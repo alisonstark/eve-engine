@@ -58,7 +58,6 @@ All detections can be exported to **JSON or CSV format** for further analysis or
 
 - **Python**: 3.11+ (3.12.7 or higher recommended)
 - **Dependencies**: Listed in `requirements.txt` (python-evtx, requests)
-- **PowerShell**: Version 2.0+ (available by default on Windows 7 and later)
 
 > 📁 `Get-WinEvent` is used to manually examine logs if needed. No additional installation required on modern Windows systems.
 
