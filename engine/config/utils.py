@@ -3,20 +3,23 @@
 # ===============================
 
 import os
+import json
 from datetime import timedelta
+import subprocess
+import time
+
 
 def show_menu():
+    """Display the main menu and get user's selection."""
     print("=== ETW Log Analyzer Toolbox ===")
     print("1) DLL Hijacking Detection")
     print("2) Unmanaged PowerShell Detection")
     print("3) Detect LSASS Dump")
     print("4) Detect Strange PPID")
-    # print("4) All of the above")
     print("5) Exit")
     print("=================================\n")
 
     target_dll = None
-    # Loop until a valid choice is made
     while True:
         try:
             choice = int(input("Select an option (1-5): "))
@@ -27,81 +30,86 @@ def show_menu():
                     
                     if target_dll and not target_dll.endswith(".dll"):
                         target_dll = input("\033[31m[-] Invalid DLL name. Please include the .dll extension:\033[0m")
-
                     elif target_dll:
                         target_dll = target_dll.strip().lower()
                     
-                    # If the user provides a DLL name, return it along with the choice
-                    print("\n")
                     return choice, target_dll if target_dll else None
-                
-                # If the user selects options 2 or 3, return the choice and None for target_dll
                 else:
-                    print("\n")
                     return choice, None
-                   
             else:
-                # In case user enters a number outside the range
-                # This will be handled in the main loop
-                print("\033[31m[-] Invalid choice. Please select a valid option (1-4).\033[0m")
-        
-        # In case user enters a non-integer value
+                print("\033[31m[-] Invalid choice. Please select a valid option (1-5).\033[0m")
         except ValueError:
             print("Invalid input. Please enter a number between 1 and 5.")
 
-# Function to display all events after a specific time
-# Filter the events based on the earliest event time
+
+def _auto_update_lists_if_needed(json_path):
+    """If the given JSON file is older than 24h, run update_lists.py to refresh lists."""
+    try:
+        mtime = os.path.getmtime(json_path)
+        now = time.time()
+        if now - mtime > 24 * 3600:
+            _run_update_lists()
+    except FileNotFoundError:
+        # If file doesn't exist, force update
+        _run_update_lists()
+
+
+def _run_update_lists():
+    """Run update_lists.py in the project root directory."""
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
+    script_path = os.path.join(root_dir, 'update_lists.py')
+    try:
+        subprocess.run(['python3', script_path], cwd=root_dir, check=True)
+    except Exception as e:
+        print(f"[!] Failed to update DLL/LOLBins lists: {e}")
+
+
+
 def filter_events_by_time(data_rows, starting_time, user_minutes):
+    """Filter events based on a starting time and optional time frame in minutes."""
     if not data_rows:
         print("\033[31m[-] No data rows available.\033[0m")
         return []
-    # Check if starting_time is not None
-    elif starting_time:
-        filtered_events = []
-        event_count = 0
-        max_events = 20
-
-        if user_minutes is None:
-            user_minutes = 0
-        # Filter events within the specified time frame
-        time_threshold = starting_time + timedelta(minutes=user_minutes)
-        
-        # Populate the filtered events list
-        for row in data_rows: 
-            time_created = row.get('DateTime', "")
-
-            # Check if the event is within the specified time frame
-            if time_threshold != starting_time and starting_time <= time_created <= time_threshold:
-                filtered_events.append(row)
-            
-            # Filter events after the specified time
-            elif time_threshold == starting_time:
-                
-                if time_created >= starting_time:
-                    filtered_events.append(row)
-                    event_count += 1
-                    # Limit the number of events to be displayed #FIXME: Keeps displaying max_events msg with every loop iteration that exceeds 20
-                    if event_count > max_events:
-                        print("\033[31m[!] There are more than 20 events. Proceed?\033[0m")
-                        user_input = input("Press 'y' to continue or any other key to stop: ").strip().lower()
-                        if user_input != 'y':
-                            print("\033[31m[!] Stopping the filtering.\033[0m")
-                            break
-                        else:
-                            print("\033[32m[+] Continuing to filter events...\033[0m")
-                            # Reset the event count
-                            event_count = 0
-                            continue
-
-        print("\n\033[32m[+] Filtered events based on the earliest detection time\033[0m\n")
-        
-    else:
+    
+    if not starting_time:
         print("\033[31m[-] No events filtered.\033[0m")
         return []
 
+    filtered_events = []
+    event_count = 0
+    max_events = 20
+
+    if user_minutes is None:
+        user_minutes = 0
+    
+    time_threshold = starting_time + timedelta(minutes=user_minutes)
+
+    for row in data_rows:
+        time_created = row.get('DateTime', "")
+
+        if time_threshold != starting_time and starting_time <= time_created <= time_threshold:
+            filtered_events.append(row)
+        elif time_threshold == starting_time:
+            if time_created >= starting_time:
+                filtered_events.append(row)
+                event_count += 1
+                
+                if event_count > max_events:
+                    print("\033[31m[!] There are more than 20 events. Proceed?\033[0m")
+                    user_input = input("Press 'y' to continue or any other key to stop: ").strip().lower()
+                    if user_input != 'y':
+                        print("\033[31m[!] Stopping the filtering.\033[0m")
+                        break
+                    else:
+                        print("\033[32m[+] Continuing to filter events...\033[0m")
+                        event_count = 0
+
+    print("\n\033[32m[+] Filtered events based on the earliest detection time\033[0m\n")
     return filtered_events
 
+
 def get_evtx_path():
+    """Prompt user for and validate .evtx file path."""
     print("Enter the full path to the .evtx file: ")
 
     while True:
@@ -110,63 +118,36 @@ def get_evtx_path():
         if not evtx_path:
             print("\033[31m[-] No path provided. Please provide a path.\033[0m")
             continue
-
         elif not evtx_path.endswith(".evtx"):
             print("\033[31m[-] Invalid file type. Please provide a .evtx file.\033[0m")
             continue
-        
         else:
             print("[+] File successfully loaded")
             break
-    
+
     return evtx_path
 
-# Generate a list of hijackable DLLs from a text file
-# The text file should be in the same directory as this script
+
 def get_hijackable_dlls():
-    hijackable_dlls = set()
-    
-    # Path to the current script
-    current_dir = os.path.dirname(__file__)
-    
-    # Go to the parent of 'config' and then into 'data'
-    base_dir = os.path.abspath(os.path.join(current_dir, ".."))
-    file_path = os.path.join(base_dir, "data", "hijackable_dlls.txt")
+    """Load hijackable DLLs from hijackable_dlls.json (generated by update_lists.py)"""
+    path = os.path.join(os.path.dirname(__file__), '../data/hijackable_dlls.json')
+    _auto_update_lists_if_needed(path)
+    with open(path, 'r', encoding='utf-8') as f:
+        dlls = json.load(f)
+    return [dll.lower() for dll in dlls]
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            dll_array = line.split(" \t")
-            
-            if len(dll_array) == 4 and dll_array[2].endswith(".dll"):
-                dll = dll_array[2].lower()
-                hijackable_dlls.add(dll)
-            
-            elif len(dll_array) == 3 and dll_array[1].endswith(".dll"):
-                dll = dll_array[1].lower()
-                hijackable_dlls.add(dll)
 
-    sorted(hijackable_dlls)
-    return hijackable_dlls
-
-# Generate a set of common LOLBins from a text file
 def get_lolbins():
-    lolbins = set()
+    """Load LOLBins from lolbins.json (generated by update_lists.py)"""
+    path = os.path.join(os.path.dirname(__file__), '../data/lolbins.json')
+    _auto_update_lists_if_needed(path)
+    with open(path, 'r', encoding='utf-8') as f:
+        lolbins = json.load(f)
+    return [lolbin.lower() for lolbin in lolbins]
 
-    # Path to the current script
-    current_dir = os.path.dirname(__file__)
-    
-    # Go to the parent of 'config' and then into 'data'
-    base_dir = os.path.abspath(os.path.join(current_dir, ".."))
-    file_path = os.path.join(base_dir, "data", "lolbins.txt")
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            lolbins.add(line.strip().lower())
 
-    sorted_lolbins = sorted(lolbins)
-    return sorted_lolbins
-
-# Check if the image path is a LOLBin
 def is_lolbin(image_path):
+    """Check if the image path is a LOLBin."""
     if not image_path:
         return False
     binary = os.path.basename(image_path).split("\\")[-1].lower()
@@ -174,14 +155,13 @@ def is_lolbin(image_path):
 
 
 def get_events_filtered_by_time(events, starting_time):
+    """Get events filtered by user-specified time frame."""
     user_minutes = None
     while True:
-        # Filter the events based on the earliest event time
         try:
             time_input = input("Enter the time frame in minutes (leave blank to display all events): ").strip().lower()
             if time_input != "":
                 user_minutes = int(time_input)
-
                 if user_minutes < 0:
                     print("\033[31m[-] Invalid time frame. Please enter a positive number.\033[0m")
                     continue
@@ -196,10 +176,8 @@ def get_events_filtered_by_time(events, starting_time):
             print(f"An error occurred in `get_events_filtered_by_time()`: {e}")
             continue
 
-    # Return filtered events
     return filter_events_by_time(events, starting_time, user_minutes)
 
-  
 
 
 

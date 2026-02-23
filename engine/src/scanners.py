@@ -3,6 +3,9 @@
 # Unmanaged PowerShell Detection Program
 # LSASS Dump Detection Program
 # ===============================
+#
+# REFACTORED: Detection functions now return data structures instead of printing.
+# Presentation and user interaction are decoupled from detection logic.
 
 import os
 import json
@@ -11,443 +14,479 @@ from config.converters import security_evtx_parser, evtx_to_csv
 import config.utils as conf
 from config.logprint import print_sysmon_event, print_security_event
 
-hijackable_dlls = conf.get_hijackable_dlls()
-lolbins = conf.get_lolbins()
+# Lazy load hijackable_dlls and lolbins - only load when actually used
+_hijackable_dlls = None
+_lolbins = None
 
-# DEBUG: Function to print the hijackable DLLs
-# def print_hijackable_dlls():
-#    for dll in hijackable_dlls:
-#        print(dll)
+def _get_hijackable_dlls_list():
+    """Get hijackable DLLs list, loading on first call (lazy loading)."""
+    global _hijackable_dlls
+    if _hijackable_dlls is None:
+        try:
+            _hijackable_dlls = conf.get_hijackable_dlls()
+        except Exception:
+            _hijackable_dlls = []
+    return _hijackable_dlls
 
-# DEBUG: Function to print the LOLBins
-# def print_lolbins():
-#    for lolbin in lolbins:
-#        print(lolbin)
+def _get_lolbins_list():
+    """Get LOLBins list, loading on first call (lazy loading)."""
+    global _lolbins
+    if _lolbins is None:
+        try:
+            _lolbins = conf.get_lolbins()
+        except Exception:
+            _lolbins = []
+    return _lolbins
 
-def detect_DLLHijack(data_rows, evtx_path=None, target_dll=None):
 
+def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
+    """
+    Detects potential DLL hijacking events by identifying suspicious DLL loads by processes.
+    
+    Args:
+        data_rows: List of event dictionaries
+        target_dll: Optional specific DLL to search for (e.g., "malicious.dll")
+        include_context: If True, filter context events from earliest detection time
+    
+    Returns:
+        {
+            "detected_events": [...],       # List of detected DLL load events
+            "context_events": [...],        # List of context-filtered events (if include_context=True)
+            "earliest_time": datetime,      # Earliest detection time
+            "commands": [...],              # Extracted malicious command lines
+            "detection_type": "DLL Hijacking",
+            "count": int,
+            "context_count": int
+        }
+    """
     spotted_rows = []
     earliest_event_time = None
+    hijackable_dlls_lower = [dll.lower() for dll in _get_hijackable_dlls_list()]
+    extracted_commands = []
 
-    # Precompute the hijackable DLLs in lowercase for efficiency
-    hijackable_dlls_lower = [dll.lower() for dll in hijackable_dlls]
-
-    # Check if the loaded image is in the array of target DLLs
+    # ================== DETECTION PHASE ==================
     for row in data_rows:
-        # Check if the row contains the necessary keys
-        # and if the EventID is '7' (DLL loaded) and the Image ends with ".exe"
-        # and if the ImageLoaded is not empty
-      
         event_id = row.get("EventID", "")
         image = row.get("Image", "")
         image_loaded = row.get("ImageLoaded", "")
-            
-        # Check if the event ID is '7' (DLL loaded) and the Image ends with ".exe"
-        if event_id == '7' and image.endswith(".exe") and image_loaded != "":
-            # Check if the loaded image is a DLL
-            dll_name = os.path.basename(image_loaded).split("\\")[-1].lower() # TODO: is os.path.basename necessary?
 
+        if event_id == '7' and image.endswith(".exe") and image_loaded:
+            dll_name = os.path.basename(image_loaded).split("\\")[-1].lower()
             event_time = row.get("DateTime", "")
-            if earliest_event_time is None or earliest_event_time > event_time:
+            
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
                 earliest_event_time = event_time
 
-            # Check if the loaded DLL is in the hijackable array or equals the target DLL
-            if target_dll and target_dll.lower() == dll_name:
-                print_sysmon_event(row)
+            is_target = target_dll and target_dll.lower() == dll_name
+            is_hijackable = not target_dll and dll_name in hijackable_dlls_lower
+            
+            if is_target or is_hijackable:
                 spotted_rows.append(row)
+                cmdline = row.get("CommandLine", "")
+                if cmdline:
+                    extracted_commands.append(cmdline)
 
-            # If no target DLL is provided, check if the loaded DLL is in the hijackable array
-            elif not target_dll and dll_name in hijackable_dlls_lower:
-                print_sysmon_event(row)
-                spotted_rows.append(row)
-    
-    # Display all other types of events starting from the earliest possible DLL hijacking time
-    # User can choose to capture all events within a fixed time window
-    len_of_rows = len(spotted_rows)
-    filtered_events = []
-    if len_of_rows != 0:
-        print(f"\n\033[31m[!]{len_of_rows} potential DLL Hijacking events were detected.\033[0m")
-        print("Fetch all events starting from the earliest detection time? (Y/N)")
-        
-        while True:
-            user_input = input("Enter your choice: ").strip().lower()
-            if user_input in ['y', 'n']:
-                break
-            print("\033[31m[-] Invalid input. Please enter 'Y' or 'N'.\033[0m")
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    if include_context and earliest_event_time and spotted_rows:
+        context_events = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        for event in context_events:
+            cmdline = event.get("CommandLine", "")
+            if cmdline and cmdline not in extracted_commands:
+                extracted_commands.append(cmdline)
 
-        if user_input == 'y':
-            filtered_events = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
-            for event in filtered_events:
-                print_sysmon_event(event)
+    return {
+        "detected_events": spotted_rows,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "commands": list(set(extracted_commands)),  # Remove duplicates
+        "detection_type": "DLL Hijacking",
+        "count": len(spotted_rows),
+        "context_count": len(context_events)
+    }
 
-        else:
-            print("\033[31m[-] No additional events filtered.\033[0m")
-    
-    else:
-        print("\033[1;31m[-] No DLL Hijacking events detected.\033[0m")
-        print("\033[1;31m[-] No events filtered.\033[0m")
-        return
-    
-    # ================== REPORTING & EXPORT ==================
-    _report_and_export_results(
-        detection_type="DLL Hijacking",
-        primary_events=spotted_rows,
-        filtered_events=filtered_events,
-        data_rows=data_rows,
-        evtx_path=evtx_path
-    )
 
-def detect_UnmanagedPowerShell(data_rows, evtx_path=None, target_dll=None):
+def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False):
     """
     Detects unmanaged PowerShell execution by identifying CLR DLL loads (clr.dll, clrjit.dll)
     and correlating them with process injection (Event ID 8, 10) and network activity (Event ID 3).
+    
+    Args:
+        data_rows: List of event dictionaries
+        target_dll: Optional specific DLL to search for
+        include_context: If True, filter context events from earliest detection time
+    
+    Returns:
+        {
+            "clr_events": [...],            # CLR DLL load events
+            "injection_events": [...],      # Process injection events
+            "network_events": [...],        # Network connection events
+            "context_events": [...],        # Context-filtered events
+            "earliest_time": datetime,
+            "commands": [...],
+            "detection_type": "Unmanaged PowerShell",
+            "clr_count": int,
+            "injection_count": int,
+            "network_count": int,
+            "context_count": int
+        }
     """
-    # ================== CONFIGURATION ==================
     CLR_DLLS = ["clr.dll", "clrjit.dll"]
     EVENT_IMAGE_LOAD = '7'
     EVENT_CREATE_REMOTE_THREAD = '8'
     EVENT_PROCESS_ACCESS = '10'
     EVENT_NETWORK_CONNECT = '3'
     HTTPS_PORT = "443"
-    
-    # ================== PHASE 1: COLLECT EVENTS ==================
-    clr_hits = []              # Actual CLR DLL loads detected
-    injection_suspects = []    # Events with IDs 8, 10 (process injection indicators)
-    network_alerts = []        # Events with ID 3 (network connections)
+    lolbins_lower = [lolbin.lower() for lolbin in _get_lolbins_list()]
+
+    clr_hits = []
+    injection_suspects = []
+    network_alerts = []
     earliest_event_time = None
-    
+    powershell_commands = []
+
+    # ================== COLLECTION PHASE ==================
     for row in data_rows:
         event_id = row.get("EventID", "")
-        
-        # --- Detect CLR DLL loads (primary indicator of unmanaged PowerShell) ---
+
         if event_id == EVENT_IMAGE_LOAD:
             image_loaded = row.get("ImageLoaded", "")
             if not image_loaded:
                 continue
-                
+
             dll_name = os.path.basename(image_loaded).split("\\")[-1].lower()
-            
-            # Check for target DLL or CLR DLLs
             is_target_match = target_dll and target_dll.lower() == dll_name
             is_clr_dll = not target_dll and dll_name in CLR_DLLS
-            
+
             if is_target_match or is_clr_dll:
-                print_sysmon_event(row)
                 clr_hits.append(row)
-                
-                # Track earliest event time for context filtering
+                cmdline = row.get("CommandLine", "")
+                image = row.get("Image", "").lower()
+                if cmdline and "powershell" in image:
+                    powershell_commands.append(cmdline)
+
                 event_time = row.get('DateTime')
                 if earliest_event_time is None or event_time < earliest_event_time:
                     earliest_event_time = event_time
-        
-        # --- Collect process injection events (Event ID 8: CreateRemoteThread, 10: ProcessAccess) ---
+
         elif event_id == EVENT_CREATE_REMOTE_THREAD or event_id == EVENT_PROCESS_ACCESS:
             injection_suspects.append(row)
-        
-        # --- Collect network connection events ---
+            cmdline = row.get("CommandLine", "")
+            image = row.get("Image", "").lower()
+            if cmdline and "powershell" in image:
+                powershell_commands.append(cmdline)
+
         elif event_id == EVENT_NETWORK_CONNECT:
             network_alerts.append(row)
-    
-    # ================== PHASE 2: USER INTERACTION & CONTEXT FILTERING ==================
-    if not clr_hits:
-        print("\033[1;31m[-] No CLR DLL loads detected.\033[0m\n")
-        return
-    
-    print(f"\n\033[31m[!] {len(clr_hits)} CLR DLL load(s) detected. Fetch suspicious events starting from the earliest detection time? (Y/N)\033[0m")
-    
-    while True:
-        user_input = input("Enter your choice: ").strip().lower()
-        if user_input in ['y', 'n']:
-            break
-        print("\033[31m[-] Invalid input. Please enter 'Y' or 'N'.\033[0m")
-    
-    filtered_events = []
-    if user_input == 'y':
-        # Filter all events starting from earliest CLR DLL load
-        filtered_events = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
-        
-        # ================== PHASE 3: ANALYZE FILTERED EVENTS ==================
-        # Separate injection and network events from the context filter
-        filtered_injection_events = []
-        filtered_network_events = []
-        
-        for event in filtered_events:
-            print_sysmon_event(event)
+            cmdline = row.get("CommandLine", "")
+            image = row.get("Image", "").lower()
+            if cmdline and "powershell" in image:
+                powershell_commands.append(cmdline)
+
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    filtered_injection_events = []
+    filtered_network_events = []
+
+    if include_context and earliest_event_time and clr_hits:
+        context_events = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+
+        for event in context_events:
             event_id = event.get("EventID", "")
-            
-            # --- Check for suspicious process injection with LOLBins ---
+
             if event_id == EVENT_PROCESS_ACCESS or event_id == EVENT_CREATE_REMOTE_THREAD:
-                source_image = event.get("SourceImage", "")
-                target_image = event.get("TargetImage", "")
+                source_image = event.get("SourceImage", "").lower()
+                target_image = event.get("TargetImage", "").lower()
                 
-                if conf.is_lolbin(source_image) or conf.is_lolbin(target_image):
-                    alert_msg = (
-                        "process accessed" if event_id == EVENT_PROCESS_ACCESS 
-                        else "remote thread created"
-                    )
-                    print(f"\033[31m[!] Potential process injection: {alert_msg}.\033[0m")
-                    print_sysmon_event(event)
+                source_binary = os.path.basename(source_image).lower() if source_image else ""
+                target_binary = os.path.basename(target_image).lower() if target_image else ""
+
+                if (source_binary in lolbins_lower) or (target_binary in lolbins_lower):
                     filtered_injection_events.append(event)
-            
-            # --- Check for suspicious network connections (LOLBin to HTTPS) ---
+
             elif event_id == EVENT_NETWORK_CONNECT:
-                image = event.get("Image", "")
+                image = event.get("Image", "").lower()
+                binary = os.path.basename(image).lower() if image else ""
                 dest_port = event.get("DestinationPort", "")
-                dest_ip = event.get("DestinationIp", "")
-                
-                if conf.is_lolbin(image) and dest_port == HTTPS_PORT:
-                    print(f"\n\033[31m[!] LOLBin made outbound HTTPS connection to: {dest_ip}:{dest_port}\033[0m")
-                    print_sysmon_event(event)
+
+                if (binary in lolbins_lower) and dest_port == HTTPS_PORT:
                     filtered_network_events.append(event)
-        
-        injection_suspects = filtered_injection_events
-        network_alerts = filtered_network_events
-    else:
-        print("\033[31m[-] Event context filtering skipped.\033[0m\n")
-    
-    # ================== PHASE 4: REPORTING & EXPORT ==================
-    _report_and_export_results(
-        detection_type="Unmanaged PowerShell",
-        primary_events=clr_hits,
-        secondary_events_dict={
-            "Injection events": injection_suspects,
-            "Network alerts": network_alerts
-        },
-        filtered_events=filtered_events,
-        data_rows=data_rows,
-        evtx_path=evtx_path
-    )
+
+    return {
+        "clr_events": clr_hits,
+        "injection_events": filtered_injection_events if include_context else injection_suspects,
+        "network_events": filtered_network_events if include_context else network_alerts,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "commands": list(set(powershell_commands)),
+        "detection_type": "Unmanaged PowerShell",
+        "clr_count": len(clr_hits),
+        "injection_count": len(filtered_injection_events) if include_context else len(injection_suspects),
+        "network_count": len(filtered_network_events) if include_context else len(network_alerts),
+        "context_count": len(context_events)
+    }
 
 
-def _report_and_export_results(detection_type, primary_events, secondary_events_dict=None, 
-                                filtered_events=None, data_rows=None, evtx_path=None):
+def detect_LsassDump(data_rows, include_context=False, security_logs_rows=None):
     """
-    Unified reporting and export function for all detection types.
+    Detects LSASS memory dump attempts by identifying ProcessAccess events (Event ID 10)
+    targeting lsass.exe with full memory access rights.
     
     Args:
-        detection_type: str - Name of detection (e.g., "DLL Hijacking", "Unmanaged PowerShell")
-        primary_events: list - Main detection events
-        secondary_events_dict: dict - Optional dict of {event_type: event_list} for secondary detections
-        filtered_events: list - Context-filtered events
-        data_rows: list - Total events analyzed
-        evtx_path: str - Path to EVTX file for export
-    """
-    # ================== SUMMARY REPORT ==================
-    len_filtered = len(filtered_events) if filtered_events else 0
-    len_total = len(data_rows) if data_rows else 0
+        data_rows: List of event dictionaries
+        include_context: If True, filter context events from security logs
+        security_logs_rows: Optional list of security log events for context filtering
     
-    print("\n\n\033[1;32m[+] Analysis complete\033[0m")
-    print(f"Detection type: {detection_type}")
-    print(f"Primary detections: {len(primary_events)}")
-    
-    # Display secondary event counts if provided
-    if secondary_events_dict:
-        for event_type, events in secondary_events_dict.items():
-            print(f"{event_type}: {len(events)}")
-    
-    if len_filtered > 0:
-        print(f"Context events filtered: {len_filtered} of {len_total}\n")
-    
-    # ================== EXPORT DECISION ==================
-    all_events = primary_events.copy()
-    if secondary_events_dict:
-        for events in secondary_events_dict.values():
-            all_events.extend(events)
-    
-    if len(all_events) == 0:
-        print("\033[31m[-] No events to export.\033[0m\n")
-        return
-    
-    print("Export results to JSON (csv/json/both/skip)? [default: json]:")
-    
-    while True:
-        choice = input("Enter your choice: ").strip().lower()
-        if choice in ['csv', 'json', 'both', 'skip', 'n', '']:
-            break
-        print("\033[31m[-] Invalid choice. Please enter 'csv', 'json', 'both', or 'skip'.\033[0m")
-    
-    # Default to JSON if user just presses Enter
-    if choice == '':
-        choice = 'json'
-    
-    if choice == 'skip' or choice == 'n':
-        print("\033[31m[-] Results not saved.\033[0m\n")
-        return
-    
-    # ================== EXPORT LOGIC ==================
-    if choice in ['json', 'both']:
-        _export_to_json(all_events, detection_type, evtx_path)
-    
-    if choice in ['csv', 'both'] and evtx_path:
-        evtx_to_csv(all_events, evtx_path)
-        print("\033[32m[+] CSV export successful.\033[0m")
-    
-    print()
-
-
-def _export_to_json(events, detection_type, evtx_path):
-    """Export events to JSON format with metadata."""
-    if not events:
-        return
-    
-    # Convert DateTime objects to strings for JSON serialization
-    events_serializable = []
-    for event in events:
-        event_copy = event.copy()
-        if 'DateTime' in event_copy and hasattr(event_copy['DateTime'], 'isoformat'):
-            event_copy['DateTime'] = event_copy['DateTime'].isoformat()
-        events_serializable.append(event_copy)
-    
-    # Create JSON structure with metadata
-    json_output = {
-        "metadata": {
-            "detection_type": detection_type,
-            "export_date": datetime.now().isoformat(),
-            "total_events": len(events),
-        },
-        "events": events_serializable
-    }
-    
-    # Generate filename
-    if evtx_path:
-        base_path = evtx_path.rsplit('.', 1)[0]  # Remove .evtx
-        json_path = f"{base_path}_{detection_type.lower().replace(' ', '_')}.json"
-    else:
-        json_path = f"detection_{detection_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    
-    try:
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(json_output, f, indent=2, default=str)
-        print(f"\033[32m[+] JSON export successful: {json_path}\033[0m")
-    except Exception as e:
-        print(f"\033[31m[-] JSON export failed: {e}\033[0m")
-
-def detect_LsassDump(data_rows, evtx_path=None, placeholder=None):
-    """
-    Detects LSASS memory dump attempts by identifying ProcessAccess events 
-    (Event ID 10) targeting lsass.exe with full memory access rights.
+    Returns:
+        {
+            "detected_events": [...],       # LSASS dump attempt events
+            "context_events": [...],        # Context-filtered security events
+            "earliest_time": datetime,
+            "commands": [...],
+            "detection_type": "LSASS Dump Attempt",
+            "count": int,
+            "context_count": int
+        }
     """
     EVENT_PROCESS_ACCESS = '10'
     FULL_ACCESS_RIGHTS = "0x001fffff"
     TARGET_PROCESS = "lsass.exe"
-    
-    # ================== PHASE 1: DETECT LSASS ACCESS EVENTS ==================
+
     spotted_rows = []
     earliest_dump_time = None
+    extracted_commands = []
 
+    # ================== DETECTION PHASE ==================
     for row in data_rows:
         event_id = row.get("EventID", "")
-        
         if event_id == EVENT_PROCESS_ACCESS:
             target_image = row.get("TargetImage", "")
             granted_access = row.get("GrantedAccess", "")
             source_user = row.get("SourceUser", "")
             target_user = row.get("TargetUser", "")
 
-            # Check if the process is lsass.exe with full memory access from different user
             if (target_image.lower().endswith(TARGET_PROCESS) and
                 granted_access.lower() == FULL_ACCESS_RIGHTS and
                 source_user.split("\\")[-1].lower() != target_user.split("\\")[-1].lower()):
 
                 dump_time = row.get('DateTime')
-                
-                # Track earliest event time for context filtering
-                if earliest_dump_time is None or dump_time < earliest_dump_time:
+                if earliest_dump_time is None or (dump_time and dump_time < earliest_dump_time):
                     earliest_dump_time = dump_time
-                
-                print_sysmon_event(row)
+
                 spotted_rows.append(row)
-    
-    # ================== PHASE 2: USER INTERACTION & CONTEXT FILTERING ==================
-    if not spotted_rows:
-        print("\033[1;31m[-] No LSASS dump attempts detected.\033[0m\n")
-        return
-    
-    print(f"\n\033[31m[!] {len(spotted_rows)} LSASS dump attempt(s) detected. Fetch security events starting from the earliest detection time? (Y/N)\033[0m")
-    
-    while True:
-        user_input = input("Enter your choice: ").strip().lower()
-        if user_input in ['y', 'n']:
-            break
-        print("\033[31m[-] Invalid input. Please enter 'Y' or 'N'.\033[0m")
-    
-    security_events = []
-    if user_input == 'y' and placeholder is None:  # TODO: Clarify why placeholder check is needed
-        print("You need to provide the path to the Security Logs .evtx file.")
-        security_logs_path = conf.get_evtx_path()
-        security_logs_rows = security_evtx_parser(security_logs_path)
+                cmdline = row.get("CommandLine", "")
+                if cmdline:
+                    extracted_commands.append(cmdline)
 
-        security_events = conf.get_events_filtered_by_time(security_logs_rows, earliest_dump_time)      
-        for security_event in security_events:
-            print_security_event(security_event)
-    else:
-        print("\033[31m[-] Security event context filtering skipped.\033[0m\n")
-    
-    # ================== PHASE 3: REPORTING & EXPORT ==================
-    _report_and_export_results(
-        detection_type="LSASS Dump Attempt",
-        primary_events=spotted_rows,
-        secondary_events_dict={"Security events": security_events} if security_events else None,
-        filtered_events=security_events if security_events else None,
-        data_rows=data_rows,
-        evtx_path=evtx_path
-    )
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    if include_context and earliest_dump_time and security_logs_rows:
+        context_events = conf.get_events_filtered_by_time(security_logs_rows, earliest_dump_time)
+        for event in context_events:
+            cmdline = event.get("CommandLine", "")
+            if cmdline and cmdline not in extracted_commands:
+                extracted_commands.append(cmdline)
+
+    return {
+        "detected_events": spotted_rows,
+        "context_events": context_events,
+        "earliest_time": earliest_dump_time,
+        "commands": list(set(extracted_commands)),
+        "detection_type": "LSASS Dump Attempt",
+        "count": len(spotted_rows),
+        "context_count": len(context_events)
+    }
 
 
-def detect_strange_PPID(data_rows, evtx_path=None, target_dll=None):
+def detect_strange_PPID(data_rows):
     """
     Detects suspicious parent-child process relationships (Strange PPID).
-    Identifies when legitimate parent processes spawn suspicious child processes.
+    
+    Args:
+        data_rows: List of event dictionaries
+    
+    Returns:
+        {
+            "detected_events": [...],       # Suspicious parent-child pairs
+            "earliest_time": datetime,
+            "commands": [...],
+            "detection_type": "Strange PPID",
+            "count": int
+        }
     """
     EVENT_PROCESS_CREATE = '1'
-    
-    # Suspicious parent-child pairs: (ParentImage, ChildImage)
     SUSPICIOUS_PAIRS = [
-        ("werfault.exe", "cmd.exe"),
-        ("explorer.exe", "powershell.exe"),
         ("winword.exe", "cmd.exe"),
+        ("winword.exe", "powershell.exe"),
+        ("excel.exe", "cmd.exe"),
         ("excel.exe", "powershell.exe"),
         ("outlook.exe", "cmd.exe"),
-        ("wscript.exe", "powershell.exe"),
-        ("mshta.exe", "powershell.exe"),
+        ("outlook.exe", "powershell.exe"),
+        ("powerpnt.exe", "cmd.exe"),
+        ("powerpnt.exe", "powershell.exe"),
+        ("onenote.exe", "cmd.exe"),
+        ("onenote.exe", "powershell.exe"),
+        ("chrome.exe", "cmd.exe"),
+        ("chrome.exe", "powershell.exe"),
+        ("firefox.exe", "cmd.exe"),
+        ("firefox.exe", "powershell.exe"),
+        ("iexplore.exe", "cmd.exe"),
+        ("iexplore.exe", "powershell.exe"),
+        ("edge.exe", "cmd.exe"),
+        ("edge.exe", "powershell.exe"),
+        ("explorer.exe", "cmd.exe"),
+        ("explorer.exe", "powershell.exe"),
         ("svchost.exe", "cmd.exe"),
+        ("svchost.exe", "powershell.exe"),
         ("services.exe", "cmd.exe"),
+        ("services.exe", "powershell.exe"),
+        ("werfault.exe", "cmd.exe"),
+        ("werfault.exe", "powershell.exe"),
+        ("wscript.exe", "cmd.exe"),
+        ("wscript.exe", "powershell.exe"),
+        ("cscript.exe", "cmd.exe"),
+        ("cscript.exe", "powershell.exe"),
+        ("mshta.exe", "cmd.exe"),
+        ("mshta.exe", "powershell.exe"),
+        ("rundll32.exe", "cmd.exe"),
         ("rundll32.exe", "powershell.exe"),
-        ("regsvr32.exe", "powershell.exe")
+        ("regsvr32.exe", "cmd.exe"),
+        ("regsvr32.exe", "powershell.exe"),
+        ("wmiprvse.exe", "cmd.exe"),
+        ("wmiprvse.exe", "powershell.exe"),
     ]
 
-    # ================== PHASE 1: DETECT SUSPICIOUS PROCESS RELATIONSHIPS ==================
     spotted_rows = []
     earliest_event_time = None
-    
+    extracted_commands = []
+
+    # ================== DETECTION PHASE ==================
     for row in data_rows:
         event_id = row.get("EventID", "")
-        
         if event_id == EVENT_PROCESS_CREATE:
             image = row.get("Image", "").split("\\")[-1].lower()
             parent_image = row.get("ParentImage", "").split("\\")[-1].lower()
-            
             if not image:
                 continue
-            
-            # Check if this parent-child pair is suspicious
-            if (parent_image, image) in SUSPICIOUS_PAIRS:
-                print_sysmon_event(row)
-                spotted_rows.append(row)
 
-                # Track earliest event time for potential context filtering
+            if (parent_image, image) in SUSPICIOUS_PAIRS:
+                spotted_rows.append(row)
                 event_time = row.get('DateTime')
-                if earliest_event_time is None or event_time < earliest_event_time:
+                if earliest_event_time is None or (event_time and event_time < earliest_event_time):
                     earliest_event_time = event_time
 
-    # ================== PHASE 2: REPORTING & EXPORT ==================
-    if not spotted_rows:
-        print("\033[1;31m[-] No suspicious parent-child process relationships detected.\033[0m\n")
-        return
+                cmdline = row.get("CommandLine", "")
+                if cmdline:
+                    extracted_commands.append(cmdline)
+
+    return {
+        "detected_events": spotted_rows,
+        "earliest_time": earliest_event_time,
+        "commands": list(set(extracted_commands)),
+        "detection_type": "Strange PPID",
+        "count": len(spotted_rows)
+    }
+
+
+# =====================================================
+# PRESENTATION FUNCTIONS (handle all printing logic)
+# =====================================================
+
+def print_detection_result(result):
+    """
+    Pretty-print detection results to console.
     
-    _report_and_export_results(
-        detection_type="Strange PPID",
-        primary_events=spotted_rows,
-        data_rows=data_rows,
-        evtx_path=evtx_path
-    )
+    Args:
+        result: Dict returned from a detect_* function
+    """
+    detection_type = result.get("detection_type", "Unknown")
+    count = result.get("count", 0)
+
+    if count == 0:
+        print(f"\033[1;31m[-] No {detection_type} events detected.\033[0m\n")
+        return
+
+    print(f"\n\033[31m[!] {count} {detection_type} event(s) detected.\033[0m")
+
+    for event in result.get("detected_events", []):
+        print_sysmon_event(event)
+
+    # Print context events if any
+    context_events = result.get("context_events", [])
+    if context_events:
+        print(f"\n\033[32m[+] {len(context_events)} context event(s) filtered:\033[0m")
+        for event in context_events:
+            print_sysmon_event(event)
+
+    # Print extracted commands if any
+    commands = result.get("commands", [])
+    if commands:
+        print(f"\n\033[32m[+] Extracted commands:\033[0m")
+        for cmd in commands:
+            print(f"    {cmd}")
+
+    print(f"\n\033[1;32m[+] Analysis complete\033[0m")
+
+
+def print_detection_summary(result):
+    """Print a brief summary of detection results."""
+    detection_type = result.get("detection_type", "Unknown")
+    count = result.get("count", 0)
+    context_count = result.get("context_count", 0)
+
+    print(f"\nDetection type: {detection_type}")
+    print(f"Primary detections: {count}")
+    if context_count > 0:
+        print(f"Context events: {context_count}")
+
+
+def export_results_to_json(result, evtx_path=None):
+    """
+    Export detection results to JSON format.
+    
+    Args:
+        result: Dict returned from a detect_* function
+        evtx_path: Optional path to EVTX file for filename generation
+    """
+    all_events = result.get("detected_events", [])
+    context_events = result.get("context_events", [])
+    all_events.extend(context_events)
+
+    if not all_events:
+        print("\033[31m[-] No events to export.\033[0m")
+        return
+
+    # Convert DateTime objects to strings
+    events_serializable = []
+    for event in all_events:
+        event_copy = event.copy()
+        if 'DateTime' in event_copy and hasattr(event_copy['DateTime'], 'isoformat'):
+            event_copy['DateTime'] = event_copy['DateTime'].isoformat()
+        events_serializable.append(event_copy)
+
+    # Create JSON structure with metadata
+    json_output = {
+        "metadata": {
+            "detection_type": result.get("detection_type", "Unknown"),
+            "export_date": datetime.now().isoformat(),
+            "total_events": len(events_serializable),
+            "extracted_commands": result.get("commands", [])
+        },
+        "events": events_serializable
+    }
+
+    # Generate filename
+    if evtx_path:
+        base_path = evtx_path.rsplit('.', 1)[0]
+        json_path = f"{base_path}_{result['detection_type'].lower().replace(' ', '_')}.json"
+    else:
+        json_path = f"detection_{result['detection_type'].lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    try:
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_output, f, indent=2, default=str)
+        print(f"\033[32m[+] JSON export successful: {json_path}\033[0m")
+        return json_path
+    except Exception as e:
+        print(f"\033[31m[-] JSON export failed: {e}\033[0m")
+        return None
