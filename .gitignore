@@ -1,9 +1,18 @@
-EVE/GitProjects.code-workspace
-EVE/.gitignore
-EVE/engine/__pycache__/
-EVE/engine/config/__pycache__/
-EVE/engine/src/__pycache__/
-engine/config/__pycache__/converters.cpython-312.pyc
-engine/config/__pycache__/logprint.cpython-312.pyc
-engine/config/__pycache__/utils.cpython-312.pyc
-engine/src/__pycache__/scanners.cpython-312.pyc
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Project files
+GitProjects.code-workspace
