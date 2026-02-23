@@ -123,7 +123,7 @@ eve-engine/
 │               └── StrangePPID.evtx   # Sample suspicious PPID events
 │
 ├── unit_tests/                        # Unit test suite
-│   └── test_scanners.py              # 18 tests covering all detections
+│   └── test_scanners.py               # 18 tests covering all detections
 │
 └── update_lists.py                    # Utility to update DLL/LOLBins lists from GitHub
 ```
