@@ -1,4 +1,3 @@
-````markdown
 # EVE - Event Verification Engine
 
 ## 📋 Table of Contents
@@ -274,6 +273,3 @@ No side effects, no file I/O, pure business logic testing.
 ## 📄 License
 
 See [LICENSE](./LICENSE) file for details.
-
-````
-
