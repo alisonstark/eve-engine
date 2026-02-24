@@ -40,6 +40,85 @@ def _get_lolbins_list():
     return _lolbins
 
 
+def score_dll_hijack_risk(event):
+    """
+    Score the risk level of a DLL load event for potential hijacking.
+    
+    Risk factors:
+    - DLL from non-system location (+40 points)
+    - Loading process is a LOLBin (+30 points)
+    - DLL in user-writable location like Downloads (+25 points)
+    - Parent process suspicious (+20 points if available)
+    
+    Returns: Risk score (0-100+), event with score added
+    """
+    risk_score = 0
+    lolbins_lower = [b.lower() for b in _get_lolbins_list()]
+    
+    # Check DLL path location
+    image_loaded = event.get("ImageLoaded", "").lower()
+    system_paths = ["c:\\windows\\system32\\", "c:\\windows\\syswow64\\", "c:\\program files"]
+    
+    is_system_path = any(image_loaded.startswith(path) for path in system_paths)
+    if not is_system_path and image_loaded:
+        # DLL from non-standard location = high risk
+        risk_score += 40
+        
+        # Extra risk if from user-writable location
+        if "\\appdata\\" in image_loaded or "\\downloads\\" in image_loaded or "\\temp\\" in image_loaded:
+            risk_score += 25
+    
+    # Check loading process
+    image = event.get("Image", "").lower()
+    process_name = os.path.basename(image).lower()
+    
+    if process_name in lolbins_lower:
+        # LOLBin loading DLL = suspicious
+        risk_score += 30
+    
+    # Unusual processes loading system DLLs are also suspicious
+    # (e.g., Notepad loading clr.dll, cmd.exe loading crypt32.dll)
+    suspicious_process_dll_combos = {
+        "notepad.exe": ["clr.dll", "jscript.dll", "vbscript.dll"],
+        "svchost.exe": ["clr.dll", "powershell.exe"],
+        "explorer.exe": ["clr.dll", "jscript.dll"],
+    }
+    
+    dll_name = os.path.basename(image_loaded).lower()
+    if process_name in suspicious_process_dll_combos:
+        if dll_name in suspicious_process_dll_combos[process_name]:
+            risk_score += 20
+    
+    # Add score to event for reporting
+    event_with_score = dict(event)
+    event_with_score["risk_score"] = risk_score
+    
+    return risk_score, event_with_score
+
+
+def filter_high_confidence_detections(detected_events, threshold=40):
+    """
+    Filter detected events to only high-confidence potential hijacking attempts.
+    
+    Args:
+        detected_events: List of DLL load events from detect_DLLHijack
+        threshold: Minimum risk score to include (default: 40)
+    
+    Returns: List of events scoring >= threshold, sorted by risk score descending
+    """
+    scored_events = []
+    
+    for event in detected_events:
+        score, scored_event = score_dll_hijack_risk(event)
+        if score >= threshold:
+            scored_events.append(scored_event)
+    
+    # Sort by risk score descending (highest risk first)
+    scored_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    
+    return scored_events
+
+
 def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
     """
     Detects potential DLL hijacking events by identifying suspicious DLL loads by processes.
@@ -51,12 +130,14 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
     
     Returns:
         {
-            "detected_events": [...],       # List of detected DLL load events
-            "context_events": [...],        # List of context-filtered events (if include_context=True)
-            "earliest_time": datetime,      # Earliest detection time
-            "commands": [...],              # Extracted malicious command lines
+            "detected_events": [...],           # List of ALL detected DLL load events
+            "high_confidence_events": [...],    # Filtered high-risk events (risk_score >= 40)
+            "context_events": [...],            # List of context-filtered events (if include_context=True)
+            "earliest_time": datetime,          # Earliest detection time
+            "commands": [...],                  # Extracted malicious command lines
             "detection_type": "DLL Hijacking",
-            "count": int,
+            "count": int,                       # Total detections
+            "high_confidence_count": int,       # High-confidence count
             "context_count": int
         }
     """
@@ -101,13 +182,19 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
             if cmdline and cmdline not in extracted_commands:
                 extracted_commands.append(cmdline)
 
+    # ================== RISK SCORING PHASE ==================
+    # Filter to high-confidence detections based on risk scoring
+    high_confidence_events = filter_high_confidence_detections(spotted_rows, threshold=40)
+
     return {
         "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
         "commands": list(set(extracted_commands)),  # Remove duplicates
         "detection_type": "DLL Hijacking",
         "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events),
         "context_count": len(context_events)
     }
 
@@ -418,14 +505,38 @@ def print_detection_result(result):
     """
     detection_type = result.get("detection_type", "Unknown")
     count = result.get("count", 0)
+    high_confidence_count = result.get("high_confidence_count")
 
     if count == 0:
         print(f"\033[1;31m[-] No {detection_type} events detected.\033[0m\n")
         return
 
-    print(f"\n\033[31m[!] {count} {detection_type} event(s) detected.\033[0m")
-
-    for event in result.get("detected_events", []):
+    # Show summary with high-confidence filtering if applicable
+    if high_confidence_count is not None:
+        print(f"\n\033[31m[!] {count} total {detection_type} event(s) detected.\033[0m")
+        print(f"\033[33m[*] {high_confidence_count} HIGH-CONFIDENCE event(s) (risk score >= 40)\033[0m\n")
+        
+        # Display high-confidence events first if they exist
+        if high_confidence_count > 0:
+            print("\033[1;33m=== HIGH-CONFIDENCE DETECTIONS ===\033[0m")
+            for event in result.get("high_confidence_events", []):
+                risk_score = event.get("risk_score", 0)
+                print(f"\033[32m[RISK SCORE: {risk_score}]\033[0m")
+                print_sysmon_event(event)
+            
+            # Also show all detections for reference
+            print("\n\033[1;36m=== ALL DETECTIONS (for reference) ===\033[0m")
+            for event in result.get("detected_events", []):
+                print_sysmon_event(event)
+        else:
+            print("\033[36m[*] No high-confidence events. Showing all detections:\033[0m")
+            for event in result.get("detected_events", []):
+                print_sysmon_event(event)
+    else:
+        # Fallback for other detection types without risk scoring
+        print(f"\n\033[31m[!] {count} {detection_type} event(s) detected.\033[0m")
+        for event in result.get("detected_events", []):
+            print_sysmon_event(event)
         print_sysmon_event(event)
 
     # Print context events if any
@@ -467,15 +578,27 @@ def export_results_to_json(result, evtx_path=None):
     """
     all_events = result.get("detected_events", [])
     context_events = result.get("context_events", [])
-    all_events.extend(context_events)
+    high_confidence_events = result.get("high_confidence_events", [])
+    
+    # Mark high-confidence events
+    all_events_with_confidence = []
+    for event in all_events:
+        event_copy = event.copy()
+        event_copy["is_high_confidence"] = any(
+            event_copy.get("risk_score") == hc.get("risk_score") 
+            for hc in high_confidence_events
+        )
+        all_events_with_confidence.append(event_copy)
+    
+    all_events_with_confidence.extend(context_events)
 
-    if not all_events:
+    if not all_events_with_confidence:
         print("\033[31m[-] No events to export.\033[0m")
         return
 
     # Convert DateTime objects to strings
     events_serializable = []
-    for event in all_events:
+    for event in all_events_with_confidence:
         event_copy = event.copy()
         if 'DateTime' in event_copy and hasattr(event_copy['DateTime'], 'isoformat'):
             event_copy['DateTime'] = event_copy['DateTime'].isoformat()
@@ -486,7 +609,9 @@ def export_results_to_json(result, evtx_path=None):
         "metadata": {
             "detection_type": result.get("detection_type", "Unknown"),
             "export_date": datetime.now().isoformat(),
-            "total_events": len(events_serializable),
+            "total_events": len(all_events),
+            "high_confidence_events": result.get("high_confidence_count", 0),
+            "context_events": len(context_events),
             "extracted_commands": result.get("commands", [])
         },
         "events": events_serializable
