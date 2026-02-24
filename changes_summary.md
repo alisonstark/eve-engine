@@ -365,26 +365,6 @@ If you're upgrading from **pre-2.0.0 versions** (very old builds):
 
 ---
 
-## 🚀 Future Enhancements
-
-### Short-term (2.1.0)
-- [ ] CLI flags for non-interactive mode
-- [ ] Support for multiple EVTX files in batch mode
-- [ ] Excel export format (.xlsx)
-
-### Medium-term (2.2.0)
-- [ ] Sigma rule integration
-- [ ] Custom detection rules via JSON config
-- [ ] Real-time ETW monitoring
-
-### Long-term (3.0.0)
-- [ ] Web UI dashboard
-- [ ] Database backend for large-scale analysis
-- [ ] Integration with SIEM platforms
-- [ ] Remove deprecated scanners.py
-
----
-
 ## 📞 Getting Help
 
 ### Running Tests
