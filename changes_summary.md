@@ -448,3 +448,77 @@ pip install -r requirements.txt
 **Version**: 2.0.0  
 **Release Date**: February 2026  
 **Status**: Stable ✓
+
+---
+
+## 🔧 Recent Updates (v2.0.1)
+
+### 1. **Improved Time-Based Event Filtering**
+
+#### Previous Behavior
+- Time filtering only applied to context events
+- Primary detections showed all events regardless of time window
+- Supported only integer minutes
+
+#### Improvements
+- **Primary detections now filtered by time window**: When user specifies a 1-minute window, primary detections show only events within 1 minute of earliest detection
+- **Flexible time input formats**: Support for fractional minutes and time unit suffixes
+  - `1m` = 1 minute
+  - `30s` = 30 seconds  
+  - `1.5m` = 1.5 minutes
+  - `5` = 5 minutes (no suffix = minutes)
+- **Fixed datetime parsing bug**: Properly converts string timestamps to datetime objects
+
+#### Impact
+- More intuitive timeline-based analysis
+- Better support for incident investigation
+
+### 2. **24-Hour Cached List Updates**
+
+#### Improvements
+- **Automatic cache checking**: Checks if JSON files were modified within last 24 hours
+- **Smart fallback**: If files are current, loads from disk instead of GitHub API
+- **Faster execution**: Skips API calls on repeated runs
+
+#### Benefits
+- Reduced GitHub API usage
+- Faster script execution
+- More sustainable rate limiting
+
+### 3. **GitHub Authentication Support**
+
+#### Environment Variable
+```bash
+$env:GITHUB_TOKEN = "github_pat_..."  # PowerShell
+setx GITHUB_TOKEN "github_pat_..."    # Permanent (Windows)
+export GITHUB_TOKEN="github_pat_..."  # Linux/macOS
+```
+
+#### Benefits
+- 60/hour → 5,000/hour API rate limit
+- Comprehensive DLL lists from GitHub
+- Avoids rate limiting
+
+### 4. **Timestamp Handling Fixed**
+
+#### Issue
+- String timestamps couldn't be added to timedelta
+- Time filtering failed silently
+
+#### Solution
+- Parse ISO format timestamps to datetime objects
+- Proper datetime arithmetic for thresholds
+- Fallback to string comparison
+
+### 5. **Updated Detection Functions**
+
+All detections now properly filter primary events by time:
+- `detect_DLLHijack()` - DLL events filtered by time
+- `detect_UnmanagedPowerShell()` - CLR/injection/network events filtered
+- `detect_LSASS_Dump()` - LSASS access attempts filtered
+
+---
+
+**Version**: 2.0.1  
+**Release Date**: February 24, 2026  
+**Status**: Stable ✓

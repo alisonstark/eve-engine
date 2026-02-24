@@ -4,9 +4,10 @@
 
 import os
 import json
-from datetime import timedelta
+from datetime import timedelta, datetime
 import subprocess
 import time
+import sys
 
 
 def show_menu():
@@ -59,7 +60,7 @@ def _run_update_lists():
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
     script_path = os.path.join(root_dir, 'update_lists.py')
     try:
-        subprocess.run(['python3', script_path], cwd=root_dir, check=True)
+        subprocess.run([sys.executable, script_path], cwd=root_dir, check=True)
     except Exception as e:
         print(f"[!] Failed to update DLL/LOLBins lists: {e}")
 
@@ -82,27 +83,82 @@ def filter_events_by_time(data_rows, starting_time, user_minutes):
     if user_minutes is None:
         user_minutes = 0
     
-    time_threshold = starting_time + timedelta(minutes=user_minutes)
+    # Parse starting_time from string to datetime, then add the time delta
+    try:
+        # Handle ISO format timestamps with optional microseconds
+        if '.' in str(starting_time):
+            start_dt = datetime.fromisoformat(str(starting_time).replace('Z', '+00:00'))
+        else:
+            start_dt = datetime.fromisoformat(str(starting_time).replace('Z', '+00:00'))
+    except ValueError:
+        # Fallback: treat as string comparison (works for ISO format)
+        print(f"\033[33m[!] Warning: Could not parse datetime '{starting_time}'. Using string comparison.\033[0m")
+        start_dt = None
+    
+    # Calculate end time threshold
+    if start_dt:
+        end_dt = start_dt + timedelta(minutes=user_minutes)
+        start_time_str = start_dt.isoformat()
+        end_time_str = end_dt.isoformat()
+    else:
+        start_time_str = str(starting_time)
+        end_time_str = None
 
     for row in data_rows:
         time_created = row.get('DateTime', "")
 
-        if time_threshold != starting_time and starting_time <= time_created <= time_threshold:
-            filtered_events.append(row)
-        elif time_threshold == starting_time:
-            if time_created >= starting_time:
-                filtered_events.append(row)
-                event_count += 1
-                
-                if event_count > max_events:
-                    print("\033[31m[!] There are more than 20 events. Proceed?\033[0m")
-                    user_input = input("Press 'y' to continue or any other key to stop: ").strip().lower()
-                    if user_input != 'y':
-                        print("\033[31m[!] Stopping the filtering.\033[0m")
-                        break
-                    else:
-                        print("\033[32m[+] Continuing to filter events...\033[0m")
-                        event_count = 0
+        if user_minutes > 0:
+            # Time range filter: from start to start + N minutes
+            if start_dt:
+                try:
+                    event_dt = datetime.fromisoformat(str(time_created).replace('Z', '+00:00'))
+                    if start_dt <= event_dt <= end_dt:
+                        filtered_events.append(row)
+                except ValueError:
+                    # Fallback to string comparison for this event
+                    if start_time_str <= time_created <= end_time_str:
+                        filtered_events.append(row)
+            else:
+                # String comparison
+                if start_time_str <= time_created <= end_time_str:
+                    filtered_events.append(row)
+        else:
+            # No time limit: show all events from starting_time onwards
+            if start_dt:
+                try:
+                    event_dt = datetime.fromisoformat(str(time_created).replace('Z', '+00:00'))
+                    if event_dt >= start_dt:
+                        filtered_events.append(row)
+                        event_count += 1
+                        
+                        if event_count > max_events:
+                            print("\033[31m[!] There are more than 20 events. Proceed?\033[0m")
+                            user_input = input("Press 'y' to continue or any other key to stop: ").strip().lower()
+                            if user_input != 'y':
+                                print("\033[31m[!] Stopping the filtering.\033[0m")
+                                break
+                            else:
+                                print("\033[32m[+] Continuing to filter events...\033[0m")
+                                event_count = 0
+                except ValueError:
+                    # Fallback to string comparison
+                    if time_created >= start_time_str:
+                        filtered_events.append(row)
+            else:
+                # String comparison
+                if time_created >= start_time_str:
+                    filtered_events.append(row)
+                    event_count += 1
+                    
+                    if event_count > max_events:
+                        print("\033[31m[!] There are more than 20 events. Proceed?\033[0m")
+                        user_input = input("Press 'y' to continue or any other key to stop: ").strip().lower()
+                        if user_input != 'y':
+                            print("\033[31m[!] Stopping the filtering.\033[0m")
+                            break
+                        else:
+                            print("\033[32m[+] Continuing to filter events...\033[0m")
+                            event_count = 0
 
     print("\n\033[32m[+] Filtered events based on the earliest detection time\033[0m\n")
     return filtered_events
@@ -155,13 +211,22 @@ def is_lolbin(image_path):
 
 
 def get_events_filtered_by_time(events, starting_time):
-    """Get events filtered by user-specified time frame."""
+    """Get events filtered by user-specified time frame. Returns both filtered events and the time window used."""
     user_minutes = None
     while True:
         try:
-            time_input = input("Enter the time frame in minutes (leave blank to display all events): ").strip().lower()
+            time_input = input("Enter time frame (e.g., '1m', '30s', '1.5m', or leave blank for all events): ").strip().lower()
             if time_input != "":
-                user_minutes = int(time_input)
+                # Parse time input with suffixes (m for minutes, s for seconds)
+                if time_input.endswith('m'):
+                    user_minutes = float(time_input[:-1])  # Remove 'm' and convert to float
+                elif time_input.endswith('s'):
+                    user_seconds = float(time_input[:-1])  # Remove 's' and convert to float
+                    user_minutes = user_seconds / 60.0  # Convert seconds to minutes
+                else:
+                    # Assume input is in minutes if no suffix
+                    user_minutes = float(time_input)
+                
                 if user_minutes < 0:
                     print("\033[31m[-] Invalid time frame. Please enter a positive number.\033[0m")
                     continue
@@ -170,13 +235,14 @@ def get_events_filtered_by_time(events, starting_time):
             else:
                 break
         except ValueError:
-            print("\033[31m[-] Invalid input. Please enter a valid number.\033[0m")
+            print("\033[31m[-] Invalid input. Please enter a valid number with optional suffix (m/s). Examples: 1m, 30s, 1.5m\033[0m")
             continue
         except Exception as e:
             print(f"An error occurred in `get_events_filtered_by_time()`: {e}")
             continue
 
-    return filter_events_by_time(events, starting_time, user_minutes)
+    filtered_events = filter_events_by_time(events, starting_time, user_minutes)
+    return filtered_events, user_minutes
 
 
 

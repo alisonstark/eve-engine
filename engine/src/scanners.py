@@ -10,6 +10,7 @@
 import os
 import json
 from datetime import datetime
+from pathlib import Path
 from config.converters import security_evtx_parser, evtx_to_csv
 import config.utils as conf
 from config.logprint import print_sysmon_event, print_security_event
@@ -89,7 +90,12 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
     # ================== CONTEXT FILTERING PHASE ==================
     context_events = []
     if include_context and earliest_event_time and spotted_rows:
-        context_events = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        
+        # Also filter primary detections by the same time window
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+        
         for event in context_events:
             cmdline = event.get("CommandLine", "")
             if cmdline and cmdline not in extracted_commands:
@@ -189,7 +195,13 @@ def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False
     filtered_network_events = []
 
     if include_context and earliest_event_time and clr_hits:
-        context_events = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+
+        # Also filter primary detections by the same time window
+        if user_minutes is not None and user_minutes > 0:
+            clr_hits = conf.filter_events_by_time(clr_hits, earliest_event_time, user_minutes)
+            injection_suspects = conf.filter_events_by_time(injection_suspects, earliest_event_time, user_minutes)
+            network_alerts = conf.filter_events_by_time(network_alerts, earliest_event_time, user_minutes)
 
         for event in context_events:
             event_id = event.get("EventID", "")
@@ -281,7 +293,12 @@ def detect_LsassDump(data_rows, include_context=False, security_logs_rows=None):
     # ================== CONTEXT FILTERING PHASE ==================
     context_events = []
     if include_context and earliest_dump_time and security_logs_rows:
-        context_events = conf.get_events_filtered_by_time(security_logs_rows, earliest_dump_time)
+        context_events, user_minutes = conf.get_events_filtered_by_time(security_logs_rows, earliest_dump_time)
+        
+        # Also filter primary detections by the same time window
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_dump_time, user_minutes)
+        
         for event in context_events:
             cmdline = event.get("CommandLine", "")
             if cmdline and cmdline not in extracted_commands:
@@ -475,18 +492,25 @@ def export_results_to_json(result, evtx_path=None):
         "events": events_serializable
     }
 
-    # Generate filename
+    # Generate filename with timestamp and save to results directory
+    results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
     if evtx_path:
-        base_path = evtx_path.rsplit('.', 1)[0]
-        json_path = f"{base_path}_{result['detection_type'].lower().replace(' ', '_')}.json"
+        evtx_name = Path(evtx_path).stem
+        json_filename = f"{evtx_name}_{result['detection_type'].lower().replace(' ', '_')}_{timestamp}.json"
     else:
-        json_path = f"detection_{result['detection_type'].lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        json_filename = f"detection_{result['detection_type'].lower().replace(' ', '_')}_{timestamp}.json"
+    
+    json_path = results_dir / json_filename
 
     try:
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_output, f, indent=2, default=str)
         print(f"\033[32m[+] JSON export successful: {json_path}\033[0m")
-        return json_path
+        return str(json_path)
     except Exception as e:
         print(f"\033[31m[-] JSON export failed: {e}\033[0m")
         return None

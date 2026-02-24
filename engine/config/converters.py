@@ -5,6 +5,7 @@
 # Python imports
 from Evtx.Evtx import Evtx
 from datetime import datetime
+from pathlib import Path
 import csv
 
 import xml.etree.ElementTree as ET
@@ -15,36 +16,23 @@ def sysmon_evtx_parser(evtx_path):
     # SUSPICION: It may be that "name" in properties[] is a match but for a specific event this property name does not exist 
 
     all_rows = []
-    properties = []
+    ns = {"ns0": "http://schemas.microsoft.com/win/2004/08/events/event"}
 
     with Evtx(str(evtx_path)) as log:
         for record in log.records():
             
             try:
-                xml_str = record.xml()
-                root = ET.fromstring(xml_str)
-                # print(ET.tostring(root, encoding='unicode', method='xml'))  # DEBUG XML format
-
-                # Namespace-aware parsing
-                ns = {"ns0": "http://schemas.microsoft.com/win/2004/08/events/event"}
-
-                properties.append("EventID")
-                properties.append("DateTime")
-                for data in root.findall(".//ns0:Data", ns):
-                    if data.text != "":
-                        name = data.attrib.get("Name")                    
-                        properties.append(name)
+                root = ET.fromstring(record.xml())
+                row_dict = {}
             
                 # ACTUAL xml format: <ns0:EventID Qualifiers="">10</ns0:EventID>
-                # Extract using namespace
-                row_dict = {}
                 event_id_elem = root.find(".//ns0:EventID", ns)
                 if event_id_elem is not None and event_id_elem.text:
                     row_dict["EventID"] = event_id_elem.text
 
                 # ACTUAL xml format: <ns0:EventData><ns0:Data Name="RuleName">-</ns0:Data>
-                # Extract using namespace
-                for data in root.findall(".//ns0:Data", ns): # DEBUG           
+                # Extract all data fields in a single pass
+                for data in root.findall(".//ns0:Data", ns):           
                     name = data.attrib.get("Name")
                     value = data.text
                     
@@ -60,10 +48,9 @@ def sysmon_evtx_parser(evtx_path):
                                 print(f"[-] Failed to parse UtcTime: {value}")
                                 continue
                         
-                        # local_time = utc_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-                        row_dict['DateTime'] = utc_time # Not local_time
+                        row_dict['DateTime'] = utc_time
                     
-                    if name in properties:
+                    if value:  # Only store non-empty values
                         row_dict[name] = value
 
                 all_rows.append(row_dict)
@@ -79,33 +66,20 @@ def sysmon_evtx_parser(evtx_path):
 
 def security_evtx_parser(evtx_path):
     all_rows = []
-    properties = []
+    ns = {"ns0": "http://schemas.microsoft.com/win/2004/08/events/event"}
 
     with Evtx(str(evtx_path)) as log:
         for record in log.records():
             try:
-                xml_str = record.xml()
-                # print(ET.tostring(record.xml(), encoding='unicode', method='xml'))
-                root = ET.fromstring(xml_str)
+                root = ET.fromstring(record.xml())
+                row_dict = {}
 
-                # Namespace-aware parsing
-                ns = {"ns0": "http://schemas.microsoft.com/win/2004/08/events/event"}
-
-                properties.append("EventID")
-                properties.append("DateTime")
-                for data in root.findall(".//ns0:Data", ns):
-                    if data.text != "":
-                        name = data.attrib.get("Name")          
-                        properties.append(name)
-
-                row_dict = {}  # default empty values
-
-                # Extract using namespace
+                # Extract EventID
                 event_id_elem = root.find(".//ns0:EventID", ns)
                 if event_id_elem is not None and event_id_elem.text:
                     row_dict["EventID"] = event_id_elem.text
                 
-                # ACTUAL xml format: <ns0:TimeCreated SystemTime="2025-04-28T12:34:56.789Z"/>
+                # Extract TimeCreated
                 time_created_elem = root.find(".//ns0:TimeCreated", ns)
                 if time_created_elem is not None and time_created_elem.attrib.get("SystemTime"):
                     time_str = time_created_elem.attrib.get("SystemTime")
@@ -121,13 +95,12 @@ def security_evtx_parser(evtx_path):
                     if utc_time:
                         row_dict['DateTime'] = utc_time
 
-                # Extract using namespace
-                for data in root.findall(".//ns0:Data", ns): # DEBUG
-                    
+                # Extract all data fields in single pass
+                for data in root.findall(".//ns0:Data", ns):
                     name = data.attrib.get("Name")
                     value = data.text or ""
 
-                    if name in properties:
+                    if value:  # Only store non-empty values
                         row_dict[name] = value
 
                 all_rows.append(row_dict)
@@ -143,11 +116,18 @@ def evtx_to_csv(data_rows, evtx_path):
     for row in data_rows:
         event_data_fields.update(row.keys())
 
-    csv_path = evtx_path.replace(".evtx", ".csv")
+    # Save to results directory with timestamp
+    results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    evtx_name = Path(evtx_path).stem
+    csv_filename = f"{evtx_name}_{timestamp}.csv"
+    csv_path = results_dir / csv_filename
+    
     with open(csv_path, mode='w', newline='', encoding='utf-8') as f:
-            # TODO: Convert sysmon_event_data_fields to a list and order it
             fieldnames = sorted(list(event_data_fields))
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(data_rows)
-    print("\033[32m[+] Results saved to CSV file:\033[0m " + csv_path)
+    print("\033[32m[+] Results saved to CSV file:\033[0m " + str(csv_path))

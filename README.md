@@ -46,11 +46,14 @@ All detections can be exported to **JSON or CSV format** for further analysis or
 - 🧪 **Comprehensive Unit Tests**  
   18 unit tests validate all detection functions independently with 100% pass rate.
 
-- 🔄 **Automatic List Updates**  
-  Hijackable DLLs and LOLBins lists auto-update from GitHub if older than 24 hours.
+- 🔄 **Automatic List Updates (24-hour cache)**  
+  Hijackable DLLs and LOLBins lists auto-update from GitHub if older than 24 hours. Supports optional GitHub token for higher API rate limits.
 
-- ⚙️ **Custom Time-Based Filtering**  
-  Filter logs based on event time to focus on recent or targeted activity.
+- ⏱️ **Advanced Time-Based Filtering**  
+  Filter detected events by time window. Supports flexible input formats:
+  - `1m` = 1 minute, `30s` = 30 seconds, `1.5m` = 1.5 minutes
+  - Both primary detections and context events filtered by specified window
+  - No time filter = show all events (default)
 
 ---
 
@@ -165,6 +168,86 @@ Export results to file? (json/csv/both/skip) [default: skip]:
 
 ---
 
+## 🔄 Updating Detection Lists
+
+The detection engine relies on two external reference lists fetched from GitHub:
+
+- **Hijackable DLLs**: Compiled from [wietze/HijackLibs](https://github.com/wietze/HijackLibs) repository
+- **LOLBins**: Compiled from [LOLBAS-Project/LOLBAS](https://github.com/LOLBAS-Project/LOLBAS) repository
+
+### Manual Update
+
+To manually update these lists, run:
+
+```bash
+python update_lists.py
+```
+
+This fetches the latest data from GitHub and saves JSON files to `engine/data/`.
+
+#### 24-Hour Cache
+
+The script automatically checks if existing list files were modified within the last 24 hours. If they're recent, it loads from disk instead of querying GitHub. This:
+- ✅ Reduces API quota usage
+- ✅ Speeds up execution on repeated runs
+- ✅ Works seamlessly for continuous workflows
+
+If you want to force a fresh fetch (ignore the cache), delete the JSON files:
+```bash
+rm engine/data/hijackable_dlls.json engine/data/lolbins.json
+# Then run update_lists.py again
+```
+
+### GitHub API Rate Limiting ⚠️
+
+GitHub's public API has rate limits:
+- **Authenticated requests**: 5,000 per hour
+- **Unauthenticated requests**: 60 per hour
+
+**The script will use fallback lists if API rate limits are exceeded.** To access the full, comprehensive lists and avoid rate limiting, provide a GitHub Personal Access Token (PAT):
+
+#### Setting a GitHub Token
+
+**Option 1: Temporary (current terminal session only)**
+```powershell
+# PowerShell
+$env:GITHUB_TOKEN = "your_pat_here"
+
+# Linux/macOS
+export GITHUB_TOKEN="your_pat_here"
+```
+
+**Option 2: Permanent (for your user account)**
+```powershell
+# PowerShell
+setx GITHUB_TOKEN "your_pat_here"
+
+# Then restart your terminal or VS Code
+```
+
+**Option 3: GitHub Codespaces**
+- Go to your repo → Settings → Secrets and variables → Codespaces
+- Add a new repository secret named `GITHUB_TOKEN`
+- Then restart the Codespace
+
+#### Generating a PAT
+
+1. Go to [GitHub Settings → Tokens](https://github.com/settings/tokens)
+2. Create a new **Personal Access Token (PAT)**
+3. Select only the `public_repo` scope
+4. Copy the token and set it as `GITHUB_TOKEN` (do not commit this to the repository)
+
+### What Happens Without a Token
+
+If the GitHub token is not set, the script will:
+1. Attempt to fetch lists from GitHub with unauthenticated requests
+2. If rate limited, fall back to hardcoded comprehensive lists (~33 DLLs, ~23 LOLBins)
+3. Show a warning message but continue successfully
+
+**Detection still works with fallback lists**, but you'll have fewer DLLs and LOLBins to match against. For comprehensive detection, setting a token is recommended.
+
+---
+
 ## 🧪 Sample Data
 
 The `engine/data/test/` directory contains sample EVTX files for testing and demonstration purposes:
@@ -185,8 +268,15 @@ python3 src/main.py
 # When prompted: engine/data/test/DLLHijack/DLLHijack.evtx
 # Select: 1 (DLL Hijacking Detection)
 # Include context: y or n (your choice)
+# Time frame: Examples: 1m, 30s, 5 (blank for all)
 # Export: json or skip
 ```
+
+**Time Frame Examples**:
+- `1m` → Show detections within 1 minute of earliest event
+- `30s` → Show detections within 30 seconds
+- `1.5m` → Show detections within 1.5 minutes
+- (blank) → Show all detections in the file
 
 ---
 
@@ -255,11 +345,57 @@ No side effects, no file I/O, pure business logic testing.
 
 ## 🧠 Future Improvements
 
- - Integration with Sigma rules
- - Real-time monitoring via ETW providers
- - Excel output support
- - CLI flags for non-interactive mode (--detection-type, --export-format, etc.)
- - Web UI dashboard for visualization
+### High-Priority Detection Additions
+
+The following detections represent core Windows security monitoring capabilities and will be implemented next:
+
+- **Brute Force/Failed Login Attempts**  
+  Event IDs 4625 (failed logon), 4648 (explicit credential use), 4740 (account lockouts)  
+  Detect repeated authentication failures indicating password spraying or brute force attacks
+
+- **Event Log Clearing/Tampering**  
+  Event IDs 1102 (Security log cleared), 1100 (event logging service shutdown)  
+  Critical indicator of attacker anti-forensics activities, often seen post-compromise
+
+- **New Service Creation/Modification**  
+  Event IDs 7045, 4697 (service installation)  
+  Common persistence and privilege escalation technique, especially suspicious when created remotely or with unusual paths
+
+- **Scheduled Task Creation/Modification**  
+  Event ID 4698 (scheduled task created)  
+  Popular persistence mechanism, monitor for tasks running from suspicious locations or with unusual triggers
+
+- **Account Manipulation**  
+  Event IDs 4720 (account created), 4732 (user added to privileged group), 4728 (member added to security-enabled global group)  
+  Track unauthorized privilege escalation and backdoor account creation, critical for domain environments
+
+### Secondary Detection Additions
+
+The following detections are valuable but may only be partially implemented, and only after all high-priority detections are complete:
+
+- **Pass-the-Hash/Pass-the-Ticket Detection**  
+  Event ID 4624 with logon type 9 (NewCredentials) or type 3 from suspicious sources, NTLM authentication from unusual processes
+
+- **Registry Persistence Mechanisms**  
+  Monitor Run keys and services registry modifications (requires Sysmon for best coverage)
+
+- **Sensitive File Access**  
+  Event ID 4663 (object access) for SAM/SECURITY/SYSTEM registry hives and NTDS.dit access on domain controllers
+
+- **Kerberos Attacks**  
+  Event IDs 4768, 4769, 4770, 4771 (Kerberos ticket operations)  
+  Detect Golden/Silver ticket attacks and Kerberoasting
+
+- **Remote Execution/Lateral Movement**  
+  Event ID 4624 logon type 3, 10 (remote desktop), WMI activity, PSRemoting session creation
+
+### General Enhancements
+
+- Integration with Sigma rules
+- Real-time monitoring via ETW providers
+- Excel output support
+- CLI flags for non-interactive mode (--detection-type, --export-format, etc.)
+- Web UI dashboard for visualization
 
 ---
 
