@@ -302,50 +302,10 @@ Console Output / File Export
 
 ---
 
-## 📊 Deprecation Notice
-
-### File: engine/src/scanners.py
-**Status**: DEPRECATED (kept for backward compatibility reference)
-
-This file contains the old monolithic implementation with embedded print statements, user interaction, and export logic. **Do not use in new code.**
-
-**Migration Path**:
-```python
-# OLD (DO NOT USE)
-from scanners import detect_DLLHijack
-result = detect_DLLHijack(data_rows, evtx_path)  # Prints and exports
-
-# NEW (USE THIS)
-from scanners import detect_DLLHijack, print_detection_result
-result = detect_DLLHijack(data_rows, include_context=False)
-print_detection_result(result)
-```
-
-### File: engine/src/scanners.py
-**Status**: ACTIVE (refactored version, primary implementation)
-
-This file contains the current, improved implementation with pure detection functions, separated presentation logic, and full unit test coverage. **Use this version in all new code.**
-
-**Features**:
-- Pure detection functions with no side effects
-- Separated presentation and user interaction layers
-- Comprehensive unit test coverage (18 tests)
-- Clean, maintainable architecture
-
----
-
-### File: engine/src/scanners.py
-**Status**: ACTIVE (refactored version, primary implementation)
-```
-
-**Future**: Consider removing scanners.py in next major version (3.0.0+)
-
----
-
 ## ✨ Benefits Summary
 
 ### For Developers
-- ✅ **Testable**: 18 unit tests validate core functionality
+- ✅ **Testable**: 28 unit tests validate core functionality
 - ✅ **Maintainable**: Clear separation of concerns makes code easier to modify
 - ✅ **Reusable**: Detection functions can be imported and used anywhere
 - ✅ **Extensible**: Easy to add new detection types following established pattern
@@ -368,21 +328,23 @@ This file contains the current, improved implementation with pure detection func
 
 ## 🔍 Testing Results
 
-### Full Test Suite Run
+### Full Test Suite Run (Current)
 ```
-Ran 18 tests in 1.713s
+Ran 28 tests in 0.004s
 
 OK
 
 Test Breakdown:
-- DLL Hijacking: 7 tests ✓
-- Unmanaged PowerShell: 3 tests ✓
-- LSASS Dump: 4 tests ✓
-- Strange PPID: 4 tests ✓
+- DLL Hijacking: 10 tests ✓
+- Unmanaged PowerShell: 5 tests ✓
+- LSASS Dump: 6 tests ✓
+- Strange PPID: 7 tests ✓
 ```
 
 ### Test Coverage
-- ✅ Happy paths (normal detections)
+- ✅ Return value field validation
+- ✅ Risk score presence and calculation
+- ✅ High-confidence filtering
 - ✅ Edge cases (no events, empty input)
 - ✅ Data validation (missing fields, wrong EventID)
 - ✅ Case sensitivity handling
@@ -391,18 +353,15 @@ Test Breakdown:
 
 ---
 
-## 📋 Backward Compatibility
+## 📋 Version History
 
-### Breaking Changes
-- **Detection function signatures changed**: Now accept `include_context` flag instead of `evtx_path`
-- **Return types changed**: Now return dicts instead of printing/exporting directly
-- **Removed**: User prompts inside detection functions
+### v2.0.0 - Initial Refactoring (Deprecated)
+If you're upgrading from **pre-2.0.0 versions** (very old builds):
+- Detection functions now return data dicts instead of printing directly
+- Use `print_detection_result()` and `export_results_to_json()` for output
+- Use `include_context` parameter instead of relying on runtime prompts
 
-### Migration Required
-If upgrading from pre-2.0.0:
-1. Update function calls to use `scanners` (refactored version)
-2. Handle print output through `print_detection_result()` instead of function side effects
-3. Use `include_context` parameter instead of relying on prompts
+**Note**: All current versions (2.0.2+) use the refactored architecture. No migration needed.
 
 ---
 
