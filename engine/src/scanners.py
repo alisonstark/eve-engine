@@ -11,9 +11,9 @@ import os
 import json
 from datetime import datetime
 from pathlib import Path
-from config.converters import security_evtx_parser, evtx_to_csv
-import config.utils as conf
-from config.logprint import print_sysmon_event, print_security_event
+from engine.config.converters import security_evtx_parser, evtx_to_csv
+import engine.config.utils as conf
+from engine.config.logprint import print_sysmon_event, print_security_event
 
 # Lazy load hijackable_dlls and lolbins - only load when actually used
 _hijackable_dlls = None
@@ -119,7 +119,269 @@ def filter_high_confidence_detections(detected_events, threshold=40):
     return scored_events
 
 
-def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
+def score_unmanaged_powershell_risk(event, event_type):
+    """
+    Score the risk level of unmanaged PowerShell execution events.
+    
+    Risk factors vary by event type:
+    - CLR DLL loads: Loaded from suspicious process (+30), from non-system location (+20)
+    - Injection events: Source is LOLBin (+40), target is system process (+20)
+    - Network events: Source is LOLBin (+30), connects to non-https port (+10)
+    
+    Args:
+        event: Event dictionary
+        event_type: "clr" | "injection" | "network"
+    
+    Returns: Risk score (0-100+), event with score added
+    """
+    risk_score = 0
+    lolbins_lower = [b.lower() for b in _get_lolbins_list()]
+    
+    event_with_score = dict(event)
+    
+    if event_type == "clr":
+        # CLR DLL load - check the loading process
+        image = event.get("Image", "").lower()
+        process_name = os.path.basename(image).lower()
+        
+        # System processes loading CLR is normal (framework usage)
+        # Non-system processes = suspicious
+        system_processes = ["svchost.exe", "dllhost.exe", "rundll32.exe", "powershell.exe"]
+        if process_name not in system_processes:
+            risk_score += 30
+        
+        # CLR from non-system location is suspicious
+        image_loaded = event.get("ImageLoaded", "").lower()
+        if not image_loaded.startswith("c:\\windows\\"):
+            risk_score += 20
+        
+        # If process itself is a LOLBin, CLR load is very suspicious
+        if process_name in lolbins_lower:
+            risk_score += 40
+    
+    elif event_type == "injection":
+        # Process injection events - check source/target
+        source_image = event.get("SourceImage", "").lower()
+        source_binary = os.path.basename(source_image).lower() if source_image else ""
+        
+        # Injection from LOLBin = high risk
+        if source_binary in lolbins_lower:
+            risk_score += 40
+        
+        # Injection into system process = medium risk
+        target_image = event.get("TargetImage", "").lower()
+        target_binary = os.path.basename(target_image).lower() if target_image else ""
+        
+        critical_system_processes = ["lsass.exe", "csrss.exe", "svchost.exe", "system.exe", "explorer.exe"]
+        if target_binary in critical_system_processes:
+            risk_score += 30
+    
+    elif event_type == "network":
+        # Network connections - check process and destination
+        image = event.get("Image", "").lower()
+        process_name = os.path.basename(image).lower()
+        
+        # Network from LOLBin = high risk
+        if process_name in lolbins_lower:
+            risk_score += 30
+        
+        # Non-standard ports = higher risk than HTTPS
+        dest_port = event.get("DestinationPort", "")
+        if dest_port and dest_port != "443":  # Not HTTPS
+            risk_score += 20
+        
+        # Suspicious destination IPs (private ranges = local network, unusual)
+        dest_ip = event.get("DestinationIp", "")
+        if dest_ip and (dest_ip.startswith("192.168.") or dest_ip.startswith("10.") or dest_ip.startswith("172.")):
+            risk_score += 15
+    
+    event_with_score["risk_score"] = risk_score
+    return risk_score, event_with_score
+
+
+def filter_high_confidence_powershell_events(clr_events, injection_events, network_events, threshold=40):
+    """
+    Filter PowerShell detection events by risk score.
+    
+    Args:
+        clr_events: CLR DLL load events
+        injection_events: Process injection events
+        network_events: Network connection events
+        threshold: Minimum risk score to include (default: 40)
+    
+    Returns: Tuple of (high_conf_clr, high_conf_injection, high_conf_network)
+    """
+    high_conf_clr = []
+    for event in clr_events:
+        score, scored_event = score_unmanaged_powershell_risk(event, "clr")
+        if score >= threshold:
+            high_conf_clr.append(scored_event)
+    
+    high_conf_injection = []
+    for event in injection_events:
+        score, scored_event = score_unmanaged_powershell_risk(event, "injection")
+        if score >= threshold:
+            high_conf_injection.append(scored_event)
+    
+    high_conf_network = []
+    for event in network_events:
+        score, scored_event = score_unmanaged_powershell_risk(event, "network")
+        if score >= threshold:
+            high_conf_network.append(scored_event)
+    
+    # Sort each by risk score descending
+    for event_list in [high_conf_clr, high_conf_injection, high_conf_network]:
+        event_list.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    
+    return high_conf_clr, high_conf_injection, high_conf_network
+
+
+def score_lsass_dump_risk(event, threshold=40):
+    """
+    Score risk of LSASS dump attempt based on source process and access patterns.
+    
+    Risk Factors:
+    - +40 for full memory access rights (0x001fffff)
+    - +30 if source is unprivileged user (not SYSTEM)
+    - +20 if source process is suspicious tool (cmd, powershell, rundll32, etc.)
+    - +15 if accessing from unusual location
+    
+    Args:
+        event: ProcessAccess event dict
+        threshold: Minimum score to consider high-confidence (default: 40)
+    
+    Returns: (risk_score, event_with_score)
+    """
+    score = 0
+    
+    # Always high risk - targeting LSASS with full access
+    source_user = event.get("SourceUser", "").lower()
+    target_user = event.get("TargetUser", "").lower()
+    source_process = event.get("SourceProcessImage", "").split("\\")[-1].lower()
+    granted_access = event.get("GrantedAccess", "").lower()
+    
+    # Full access rights (0x001fffff) - already validated in detection
+    if granted_access == "0x001fffff":
+        score += 40
+    
+    # Check if source is unprivileged user accessing SYSTEM process
+    if source_user and "system" not in source_user and "nt authority" not in source_user:
+        score += 30
+    
+    # Suspicious source processes
+    suspicious_sources = [
+        "cmd.exe", "powershell.exe", "rundll32.exe", "regsvcs.exe",
+        "cscript.exe", "wscript.exe", "mshta.exe", "wmiprvse.exe"
+    ]
+    if source_process in suspicious_sources:
+        score += 20
+    
+    # Context: source from unusual location
+    source_image = event.get("SourceProcessImage", "")
+    if source_image and "\\temp\\" in source_image.lower() or "\\users\\" in source_image.lower():
+        score += 15
+    
+    event_with_score = event.copy()
+    event_with_score["risk_score"] = score
+    
+    return score, event_with_score
+
+
+def filter_high_confidence_lsass_events(events, threshold=40):
+    """
+    Filter LSASS dump events by risk score.
+    
+    Args:
+        events: List of ProcessAccess events targeting LSASS
+        threshold: Minimum risk score to include (default: 40)
+    
+    Returns: List of high-confidence events sorted by risk score
+    """
+    high_conf = []
+    for event in events:
+        score, scored_event = score_lsass_dump_risk(event, threshold)
+        if score >= threshold:
+            high_conf.append(scored_event)
+    
+    high_conf.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    return high_conf
+
+
+def score_strange_ppid_risk(event):
+    """
+    Score risk of suspicious parent-child process relationship.
+    
+    Risk Factors:
+    - +50 for Office apps spawning shells (very suspicious)
+    - +40 for browsers spawning shells (suspicious)
+    - +35 for system tools spawning shells (very suspicious)
+    - +25 for script engines spawning shells (suspicious)
+    - +10 if spawning powershell (more dangerous than cmd)
+    - +5 if command line contains base64 or other encoding indicators
+    
+    Args:
+        event: Process create event dict
+    
+    Returns: (risk_score, event_with_score)
+    """
+    score = 0
+    parent_image = event.get("ParentImage", "").split("\\")[-1].lower()
+    image = event.get("Image", "").split("\\")[-1].lower()
+    cmdline = event.get("CommandLine", "").lower()
+    
+    # Risk by parent process type
+    office_apps = ["winword.exe", "excel.exe", "outlook.exe", "powerpnt.exe", "onenote.exe"]
+    browser_apps = ["chrome.exe", "firefox.exe", "iexplore.exe", "edge.exe"]
+    system_tools = ["explorer.exe", "svchost.exe", "services.exe", "werfault.exe", "wmiprvse.exe"]
+    script_engines = ["wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe"]
+    
+    if parent_image in office_apps:
+        score += 50
+    elif parent_image in system_tools:
+        score += 35
+    elif parent_image in browser_apps:
+        score += 40
+    elif parent_image in script_engines:
+        score += 25
+    else:
+        score += 15  # Base score for unexpected parents
+    
+    # PowerShell is more dangerous than cmd
+    if image == "powershell.exe":
+        score += 10
+    
+    # Encoding indicators (base64, hex, etc.)
+    encoding_indicators = ["base64", "-enc", "-encodedcommand", "0x", "frombase64"]
+    if any(indicator in cmdline for indicator in encoding_indicators):
+        score += 5
+    
+    event_with_score = event.copy()
+    event_with_score["risk_score"] = score
+    
+    return score, event_with_score
+
+
+def filter_high_confidence_ppid_events(events, threshold=40):
+    """
+    Filter Strange PPID events by risk score.
+    
+    Args:
+        events: List of process creation events with suspicious parent-child pairs
+        threshold: Minimum risk score to include (default: 40)
+    
+    Returns: List of high-confidence events sorted by risk score
+    """
+    high_conf = []
+    for event in events:
+        score, scored_event = score_strange_ppid_risk(event)
+        if score >= threshold:
+            high_conf.append(scored_event)
+    
+    high_conf.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    return high_conf
+
+
+def detect_DLLHijack(data_rows, target_dll=None, include_context=True):
     """
     Detects potential DLL hijacking events by identifying suspicious DLL loads by processes.
     
@@ -198,7 +460,6 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=False):
         "context_count": len(context_events)
     }
 
-
 def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False):
     """
     Detects unmanaged PowerShell execution by identifying CLR DLL loads (clr.dll, clrjit.dll)
@@ -211,16 +472,22 @@ def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False
     
     Returns:
         {
-            "clr_events": [...],            # CLR DLL load events
-            "injection_events": [...],      # Process injection events
-            "network_events": [...],        # Network connection events
-            "context_events": [...],        # Context-filtered events
+            "clr_events": [...],                    # All CLR DLL load events
+            "high_confidence_clr_events": [...],    # High-risk CLR events
+            "injection_events": [...],              # All process injection events
+            "high_confidence_injection_events": [...], # High-risk injection events
+            "network_events": [...],                # All network connection events
+            "high_confidence_network_events": [...], # High-risk network events
+            "context_events": [...],                # Context-filtered events
             "earliest_time": datetime,
             "commands": [...],
             "detection_type": "Unmanaged PowerShell",
             "clr_count": int,
+            "high_confidence_clr_count": int,
             "injection_count": int,
+            "high_confidence_injection_count": int,
             "network_count": int,
+            "high_confidence_network_count": int,
             "context_count": int
         }
     """
@@ -311,17 +578,32 @@ def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False
                 if (binary in lolbins_lower) and dest_port == HTTPS_PORT:
                     filtered_network_events.append(event)
 
+    # ================== RISK SCORING PHASE ==================
+    # Filter to high-confidence events based on risk scoring
+    high_conf_clr, high_conf_injection, high_conf_network = filter_high_confidence_powershell_events(
+        clr_hits, 
+        filtered_injection_events if include_context else injection_suspects,
+        filtered_network_events if include_context else network_alerts,
+        threshold=40
+    )
+
     return {
         "clr_events": clr_hits,
+        "high_confidence_clr_events": high_conf_clr,
         "injection_events": filtered_injection_events if include_context else injection_suspects,
+        "high_confidence_injection_events": high_conf_injection,
         "network_events": filtered_network_events if include_context else network_alerts,
+        "high_confidence_network_events": high_conf_network,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
         "commands": list(set(powershell_commands)),
         "detection_type": "Unmanaged PowerShell",
         "clr_count": len(clr_hits),
+        "high_confidence_clr_count": len(high_conf_clr),
         "injection_count": len(filtered_injection_events) if include_context else len(injection_suspects),
+        "high_confidence_injection_count": len(high_conf_injection),
         "network_count": len(filtered_network_events) if include_context else len(network_alerts),
+        "high_confidence_network_count": len(high_conf_network),
         "context_count": len(context_events)
     }
 
@@ -338,12 +620,14 @@ def detect_LsassDump(data_rows, include_context=False, security_logs_rows=None):
     
     Returns:
         {
-            "detected_events": [...],       # LSASS dump attempt events
-            "context_events": [...],        # Context-filtered security events
+            "detected_events": [...],                   # LSASS dump attempt events
+            "high_confidence_events": [...],            # Filtered high-risk events (risk_score >= 40)
+            "context_events": [...],                    # Context-filtered security events
             "earliest_time": datetime,
             "commands": [...],
             "detection_type": "LSASS Dump Attempt",
             "count": int,
+            "high_confidence_count": int,
             "context_count": int
         }
     """
@@ -391,13 +675,19 @@ def detect_LsassDump(data_rows, include_context=False, security_logs_rows=None):
             if cmdline and cmdline not in extracted_commands:
                 extracted_commands.append(cmdline)
 
+    # ================== RISK SCORING PHASE ==================
+    # Filter to high-confidence detections based on risk scoring
+    high_confidence_events = filter_high_confidence_lsass_events(spotted_rows, threshold=40)
+
     return {
         "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_dump_time,
         "commands": list(set(extracted_commands)),
         "detection_type": "LSASS Dump Attempt",
         "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events),
         "context_count": len(context_events)
     }
 
@@ -411,11 +701,13 @@ def detect_strange_PPID(data_rows):
     
     Returns:
         {
-            "detected_events": [...],       # Suspicious parent-child pairs
+            "detected_events": [...],                   # Suspicious parent-child pairs
+            "high_confidence_events": [...],            # Filtered high-risk events (risk_score >= 40)
             "earliest_time": datetime,
             "commands": [...],
             "detection_type": "Strange PPID",
-            "count": int
+            "count": int,
+            "high_confidence_count": int
         }
     """
     EVENT_PROCESS_CREATE = '1'
@@ -483,12 +775,18 @@ def detect_strange_PPID(data_rows):
                 if cmdline:
                     extracted_commands.append(cmdline)
 
+    # ================== RISK SCORING PHASE ==================
+    # Filter to high-confidence detections based on risk scoring
+    high_confidence_events = filter_high_confidence_ppid_events(spotted_rows, threshold=40)
+
     return {
         "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
         "earliest_time": earliest_event_time,
         "commands": list(set(extracted_commands)),
         "detection_type": "Strange PPID",
-        "count": len(spotted_rows)
+        "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events)
     }
 
 
@@ -499,45 +797,124 @@ def detect_strange_PPID(data_rows):
 def print_detection_result(result):
     """
     Pretty-print detection results to console.
+    Handles both DLL Hijacking format (detected_events) and PowerShell format (clr/injection/network_events).
     
     Args:
         result: Dict returned from a detect_* function
     """
     detection_type = result.get("detection_type", "Unknown")
-    count = result.get("count", 0)
-    high_confidence_count = result.get("high_confidence_count")
-
-    if count == 0:
-        print(f"\033[1;31m[-] No {detection_type} events detected.\033[0m\n")
-        return
-
-    # Show summary with high-confidence filtering if applicable
-    if high_confidence_count is not None:
-        print(f"\n\033[31m[!] {count} total {detection_type} event(s) detected.\033[0m")
-        print(f"\033[33m[*] {high_confidence_count} HIGH-CONFIDENCE event(s) (risk score >= 40)\033[0m\n")
+    
+    # Handle DLL Hijacking format (single detected_events list)
+    if "detected_events" in result:
+        count = result.get("count", 0)
+        high_confidence_count = result.get("high_confidence_count")
         
-        # Display high-confidence events first if they exist
-        if high_confidence_count > 0:
-            print("\033[1;33m=== HIGH-CONFIDENCE DETECTIONS ===\033[0m")
-            for event in result.get("high_confidence_events", []):
-                risk_score = event.get("risk_score", 0)
-                print(f"\033[32m[RISK SCORE: {risk_score}]\033[0m")
-                print_sysmon_event(event)
+        if count == 0:
+            print(f"\033[1;31m[-] No {detection_type} events detected.\033[0m\n")
+            return
+
+        # Show summary with high-confidence filtering if applicable
+        if high_confidence_count is not None:
+            print(f"\n\033[31m[!] {count} total {detection_type} event(s) detected.\033[0m")
+            print(f"\033[33m[*] {high_confidence_count} HIGH-CONFIDENCE event(s) (risk score >= 40)\033[0m\n")
             
-            # Also show all detections for reference
-            print("\n\033[1;36m=== ALL DETECTIONS (for reference) ===\033[0m")
+            # Display high-confidence events first if they exist
+            if high_confidence_count > 0:
+                print("\033[1;33m=== HIGH-CONFIDENCE DETECTIONS ===\033[0m")
+                for event in result.get("high_confidence_events", []):
+                    risk_score = event.get("risk_score", 0)
+                    print(f"\033[32m[RISK SCORE: {risk_score}]\033[0m")
+                    print_sysmon_event(event)
+                
+                # Also show all detections for reference
+                print("\n\033[1;36m=== ALL DETECTIONS (for reference) ===\033[0m")
+                for event in result.get("detected_events", []):
+                    print_sysmon_event(event)
+            else:
+                print("\033[36m[*] No high-confidence events. Showing all detections:\033[0m")
+                for event in result.get("detected_events", []):
+                    print_sysmon_event(event)
+        else:
+            # Fallback for other detection types without risk scoring
+            print(f"\n\033[31m[!] {count} {detection_type} event(s) detected.\033[0m")
             for event in result.get("detected_events", []):
+                print_sysmon_event(event)
+
+    # Handle Unmanaged PowerShell format (multiple event type lists)
+    elif "clr_events" in result or "injection_events" in result or "network_events" in result:
+        clr_count = result.get("clr_count", 0)
+        injection_count = result.get("injection_count", 0)
+        network_count = result.get("network_count", 0)
+        total_count = clr_count + injection_count + network_count
+        
+        hc_clr = result.get("high_confidence_clr_count", 0)
+        hc_injection = result.get("high_confidence_injection_count", 0)
+        hc_network = result.get("high_confidence_network_count", 0)
+        total_hc = hc_clr + hc_injection + hc_network
+        
+        if total_count == 0:
+            print(f"\033[1;31m[-] No {detection_type} events detected.\033[0m\n")
+            return
+        
+        print(f"\n\033[31m[!] {total_count} total {detection_type} event(s) detected.\033[0m")
+        print(f"    - CLR: {clr_count} ({hc_clr} high-confidence)")
+        print(f"    - Injection: {injection_count} ({hc_injection} high-confidence)")
+        print(f"    - Network: {network_count} ({hc_network} high-confidence)")
+        print(f"\033[33m[*] {total_hc} total HIGH-CONFIDENCE event(s) (risk score >= 40)\033[0m\n")
+        
+        if total_hc > 0:
+            # Show high-confidence CLR events
+            hc_clr_events = result.get("high_confidence_clr_events", [])
+            if hc_clr_events:
+                print("\033[1;33m=== HIGH-CONFIDENCE CLR EVENTS ===\033[0m")
+                for event in hc_clr_events:
+                    risk_score = event.get("risk_score", 0)
+                    print(f"\033[32m[RISK SCORE: {risk_score}]\033[0m")
+                    print_sysmon_event(event)
+            
+            # Show high-confidence Injection events
+            hc_injection_events = result.get("high_confidence_injection_events", [])
+            if hc_injection_events:
+                print("\n\033[1;33m=== HIGH-CONFIDENCE INJECTION EVENTS ===\033[0m")
+                for event in hc_injection_events:
+                    risk_score = event.get("risk_score", 0)
+                    print(f"\033[32m[RISK SCORE: {risk_score}]\033[0m")
+                    print_sysmon_event(event)
+            
+            # Show high-confidence Network events
+            hc_network_events = result.get("high_confidence_network_events", [])
+            if hc_network_events:
+                print("\n\033[1;33m=== HIGH-CONFIDENCE NETWORK EVENTS ===\033[0m")
+                for event in hc_network_events:
+                    risk_score = event.get("risk_score", 0)
+                    print(f"\033[32m[RISK SCORE: {risk_score}]\033[0m")
+                    print_sysmon_event(event)
+            
+            # Show all detections for reference
+            print("\n\033[1;36m=== ALL DETECTIONS (for reference) ===\033[0m")
+            for event in result.get("clr_events", []):
+                print("\033[36m[CLR]\033[0m", end=" ")
+                print_sysmon_event(event)
+            for event in result.get("injection_events", []):
+                print("\033[36m[INJECTION]\033[0m", end=" ")
+                print_sysmon_event(event)
+            for event in result.get("network_events", []):
+                print("\033[36m[NETWORK]\033[0m", end=" ")
                 print_sysmon_event(event)
         else:
-            print("\033[36m[*] No high-confidence events. Showing all detections:\033[0m")
-            for event in result.get("detected_events", []):
-                print_sysmon_event(event)
-    else:
-        # Fallback for other detection types without risk scoring
-        print(f"\n\033[31m[!] {count} {detection_type} event(s) detected.\033[0m")
-        for event in result.get("detected_events", []):
-            print_sysmon_event(event)
-        print_sysmon_event(event)
+            print("\033[36m[*] No high-confidence events. Showing all detections by category:\033[0m")
+            if result.get("clr_events"):
+                print("\n\033[36m--- CLR Events ---\033[0m")
+                for event in result.get("clr_events", []):
+                    print_sysmon_event(event)
+            if result.get("injection_events"):
+                print("\n\033[36m--- Injection Events ---\033[0m")
+                for event in result.get("injection_events", []):
+                    print_sysmon_event(event)
+            if result.get("network_events"):
+                print("\n\033[36m--- Network Events ---\033[0m")
+                for event in result.get("network_events", []):
+                    print_sysmon_event(event)
 
     # Print context events if any
     context_events = result.get("context_events", [])
@@ -576,21 +953,84 @@ def export_results_to_json(result, evtx_path=None):
         result: Dict returned from a detect_* function
         evtx_path: Optional path to EVTX file for filename generation
     """
-    all_events = result.get("detected_events", [])
     context_events = result.get("context_events", [])
-    high_confidence_events = result.get("high_confidence_events", [])
     
-    # Mark high-confidence events
-    all_events_with_confidence = []
-    for event in all_events:
-        event_copy = event.copy()
-        event_copy["is_high_confidence"] = any(
-            event_copy.get("risk_score") == hc.get("risk_score") 
-            for hc in high_confidence_events
-        )
-        all_events_with_confidence.append(event_copy)
+    # Handle DLL Hijacking format (single detected_events)
+    if "detected_events" in result:
+        all_events = result.get("detected_events", [])
+        high_confidence_events = result.get("high_confidence_events", [])
+        
+        # Mark high-confidence events
+        all_events_with_confidence = []
+        for event in all_events:
+            event_copy = event.copy()
+            event_copy["is_high_confidence"] = any(
+                event_copy.get("risk_score") == hc.get("risk_score") 
+                for hc in high_confidence_events
+            )
+            all_events_with_confidence.append(event_copy)
+        
+        all_events_with_confidence.extend(context_events)
+        
+        metadata = {
+            "detection_type": result.get("detection_type", "Unknown"),
+            "export_date": datetime.now().isoformat(),
+            "total_events": result.get("count", 0),
+            "high_confidence_events": result.get("high_confidence_count", 0),
+            "context_events": len(context_events),
+            "extracted_commands": result.get("commands", [])
+        }
     
-    all_events_with_confidence.extend(context_events)
+    # Handle Unmanaged PowerShell format (multiple event types)
+    elif "clr_events" in result:
+        all_events_with_confidence = []
+        
+        # Collect all event types with confidence flags
+        for event in result.get("clr_events", []):
+            event_copy = event.copy()
+            event_copy["event_category"] = "clr"
+            event_copy["is_high_confidence"] = any(
+                event_copy.get("risk_score") == hc.get("risk_score") 
+                for hc in result.get("high_confidence_clr_events", [])
+            )
+            all_events_with_confidence.append(event_copy)
+        
+        for event in result.get("injection_events", []):
+            event_copy = event.copy()
+            event_copy["event_category"] = "injection"
+            event_copy["is_high_confidence"] = any(
+                event_copy.get("risk_score") == hc.get("risk_score") 
+                for hc in result.get("high_confidence_injection_events", [])
+            )
+            all_events_with_confidence.append(event_copy)
+        
+        for event in result.get("network_events", []):
+            event_copy = event.copy()
+            event_copy["event_category"] = "network"
+            event_copy["is_high_confidence"] = any(
+                event_copy.get("risk_score") == hc.get("risk_score") 
+                for hc in result.get("high_confidence_network_events", [])
+            )
+            all_events_with_confidence.append(event_copy)
+        
+        all_events_with_confidence.extend(context_events)
+        
+        metadata = {
+            "detection_type": result.get("detection_type", "Unknown"),
+            "export_date": datetime.now().isoformat(),
+            "clr_events": result.get("clr_count", 0),
+            "high_confidence_clr": result.get("high_confidence_clr_count", 0),
+            "injection_events": result.get("injection_count", 0),
+            "high_confidence_injection": result.get("high_confidence_injection_count", 0),
+            "network_events": result.get("network_count", 0),
+            "high_confidence_network": result.get("high_confidence_network_count", 0),
+            "context_events": len(context_events),
+            "extracted_commands": result.get("commands", [])
+        }
+    
+    else:
+        print("\033[31m[-] No events to export.\033[0m")
+        return
 
     if not all_events_with_confidence:
         print("\033[31m[-] No events to export.\033[0m")
@@ -606,14 +1046,7 @@ def export_results_to_json(result, evtx_path=None):
 
     # Create JSON structure with metadata
     json_output = {
-        "metadata": {
-            "detection_type": result.get("detection_type", "Unknown"),
-            "export_date": datetime.now().isoformat(),
-            "total_events": len(all_events),
-            "high_confidence_events": result.get("high_confidence_count", 0),
-            "context_events": len(context_events),
-            "extracted_commands": result.get("commands", [])
-        },
+        "metadata": metadata,
         "events": events_serializable
     }
 

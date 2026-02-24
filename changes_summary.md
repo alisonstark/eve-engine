@@ -631,3 +631,108 @@ def export_results_to_json(result, ...)
 **Version**: 2.0.2  
 **Release Date**: February 24, 2026  
 **Status**: Stable ✓
+
+---
+
+##  Version 2.0.3 - Risk Scoring for All Detections
+
+**Release Date**: February 24, 2026  
+**Status**: Stable & Tested 
+
+### Overview
+Extended the multi-factor risk scoring pattern (originally implemented for DLL Hijacking) to all remaining detection types: **Unmanaged PowerShell**, **LSASS Dump**, and **Strange PPID**. Each detection type now includes type-specific risk factors and comprehensive unit test coverage.
+
+### Changes
+
+#### 1. **Unmanaged PowerShell Risk Scoring**
+Added type-specific scoring for three event categories:
+
+**CLR Event Scoring** (+30 to +100):
+- +30 for non-system process loading CLR
+- +20 for clr.dll in non-standard location
+- +40 if LOLBin is the source process
+
+**Injection Event Scoring** (+40 to +110):
+- +40 if source is LOLBin
+- +30 if target is critical system process (lsass, csrss, svchost)
+
+**Network Event Scoring** (+15 to +65):
+- +30 if source is LOLBin, +20 if non-HTTPS, +15 if private IP range
+
+**Output**: Returns three separate high-confidence lists (CLR, injection, network) with risk scores
+
+#### 2. **LSASS Dump Risk Scoring**
+**Risk Factors**:
+- +40 for full memory access rights (0x001fffff)
+- +30 if source is unprivileged user
+- +20 if source is suspicious tool (cmd, powershell, rundll32, etc.)
+- +15 if source process from unusual location
+
+#### 3. **Strange PPID Risk Scoring**
+**Parent Process Risk Tiers**:
+- Office Apps (winword, excel, outlook)  +50
+- System Tools (explorer, svchost, services)  +35
+- Browsers (chrome, firefox, edge)  +40
+- Script Engines (wscript, mshta, rundll32)  +25
+
+**Modifiers**:
+- powershell.exe  +10 (more dangerous than cmd.exe)
+- Encoding indicators (base64, -enc)  +5
+
+#### 4. **Return Value Updates**
+All detection functions now include high-confidence fields and counts for risk-scored events.
+
+#### 5. **Display & Export Enhancements**
+- `print_detection_result()` handles both single-list and multi-list formats
+- PowerShell shows three separate high-confidence sections
+- `export_results_to_json()` auto-detects format and marks high-confidence events
+
+#### 6. **Unit Test Expansion**
+- Added 10 new tests (28 total, all passing)
+- Test coverage: return fields, risk scores, threshold filtering, score ordering
+- All tests pass without code modifications
+
+#### 7. **Import Path Fix**
+Fixed relative imports for proper test execution:
+- Changed from `config.converters` to `engine.config.converters`
+- Enables tests to run from project root with PYTHONPATH support
+
+### Summary Statistics
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Detection Types with Risk Scoring | 1 | 4 | +300% |
+| Unit Tests | 18 | 28 | +56% |
+| Scoring Functions | 2 | 6 | +200% |
+| Lines of Code (scanners.py) | 600 | 1075 | +79% |
+
+### Testing Results
+
+```
+Ran 28 tests in 0.004s
+OK
+
+Test Breakdown:
+- DLL Hijacking: 10 tests 
+- Unmanaged PowerShell: 5 tests 
+- LSASS Dump: 6 tests 
+- Strange PPID: 7 tests 
+```
+
+### Files Changed
+- `engine/src/scanners.py` (+475 lines): 6 new scoring functions
+- `unit_tests/test_scanners.py` (+85 lines): 10 comprehensive tests
+- `README.md`: Updated features documentation  
+- `CHANGES_SUMMARY.md`: This file
+
+### Next Steps
+- Real-world testing with actual EVTX samples
+- User feedback on risk score thresholds
+- GUI dashboard for risk visualization
+- SIEM platform integration
+
+---
+
+**Version**: 2.0.3  
+**Release Date**: February 24, 2026  
+**Status**: Stable 

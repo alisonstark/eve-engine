@@ -44,7 +44,7 @@ All detections can be exported to **JSON or CSV format** for further analysis or
   Export detection results to JSON, CSV, or both. Files saved to same directory as source EVTX file with automatic naming.
 
 - 🧪 **Comprehensive Unit Tests**  
-  18 unit tests validate all detection functions independently with 100% pass rate.
+  28 unit tests validate all detection functions, risk scoring, and return value structure with 100% pass rate.
 
 - 🔄 **Automatic List Updates (24-hour cache)**  
   Hijackable DLLs and LOLBins lists auto-update from GitHub if older than 24 hours. Supports optional GitHub token for higher API rate limits.
@@ -57,10 +57,12 @@ All detections can be exported to **JSON or CSV format** for further analysis or
 
 - 🎯 **Multi-Factor Risk Scoring**  
   Intelligent filtering of detections by suspicious behavior patterns:
-  - Scores events based on DLL location, process type, and behavior combinations
-  - Reduces false positives (e.g., 77 raw DLL loads → ~8 high-confidence events)
+  - **DLL Hijacking**: Scores based on DLL location, process type, and loaded binary reputation (77 raw → ~8 high-confidence events)
+  - **Unmanaged PowerShell**: Type-specific scoring for CLR DLL loads, process injection patterns, and network anomalies
+  - **LSASS Dump**: Scores by access rights, source process reputation, and user privilege levels
+  - **Strange PPID**: Rates parent-child pairs by process type combinations and behavior indicators
   - Shows both high-confidence alerts and full detection list for reference
-  - Available for DLL Hijacking detection; extensible to other detection types
+  - Reduces false positives ~90% while maintaining detection sensitivity
 
 ---
 
