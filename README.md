@@ -425,3 +425,15 @@ The following detections are valuable but may only be partially implemented, and
 ## 📄 License
 
 See [LICENSE](./LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- **Security research community** - For sharing offensive tradecraft that informs defensive practices
+
+---
+
+<div align="center">
+
+**Built with 🛡️ for defenders by defenders**
+
+</div>
