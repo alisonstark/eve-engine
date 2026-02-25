@@ -1,0 +1,145 @@
+flowchart TD
+    %% Color Definitions
+    classDef entryExit fill:#e1f5e1,stroke:#2e7d32,stroke-width:3px
+    classDef coreProcessing fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef optionalFeature fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef outputGeneration fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef externalIntegration fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef decision fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    
+    %% Entry Point
+    START([Program Start]):::entryExit
+    
+    %% Initial Setup & Input
+    START --> INIT[Initialize Program<br/>main.py]:::coreProcessing
+    INIT --> GET_PATH[get_evtx_path<br/>utils.py]:::coreProcessing
+    GET_PATH --> VALIDATE_PATH{Valid .evtx<br/>file?}:::decision
+    VALIDATE_PATH -->|No| GET_PATH
+    VALIDATE_PATH -->|Yes| PARSE_EVTX[sysmon_evtx_parser<br/>converters.py]:::coreProcessing
+    
+    %% Optional: Auto-update Lists (External Integration)
+    PARSE_EVTX --> CHECK_LISTS{Lists older<br/>than 24h?}:::decision
+    CHECK_LISTS -->|Yes| UPDATE_LISTS[_run_update_lists<br/>utils.py]:::externalIntegration
+    UPDATE_LISTS --> FETCH_GITHUB[Fetch from GitHub API<br/>update_lists.py]:::externalIntegration
+    FETCH_GITHUB --> SAVE_JSON[Save to JSON<br/>hijackable_dlls.json<br/>lolbins.json]:::externalIntegration
+    SAVE_JSON --> MENU
+    CHECK_LISTS -->|No| MENU
+    
+    %% Main Menu Loop
+    MENU[show_menu<br/>utils.py]:::coreProcessing
+    MENU --> MENU_CHOICE{User<br/>Selection?}:::decision
+    
+    %% Menu Options
+    MENU_CHOICE -->|1| DLL_TARGET{Specify<br/>target DLL?}:::decision
+    MENU_CHOICE -->|2| PS_TARGET{Specify<br/>target DLL?}:::decision
+    MENU_CHOICE -->|3| LSASS_PATH
+    MENU_CHOICE -->|4| PPID_PATH
+    MENU_CHOICE -->|5| EXIT
+    
+    %% DLL Hijacking Path
+    DLL_TARGET -->|Yes| DLL_INPUT[Get DLL name<br/>from user]:::optionalFeature
+    DLL_INPUT --> DLL_CONTEXT
+    DLL_TARGET -->|No| DLL_CONTEXT{Include<br/>context?}:::decision
+    DLL_CONTEXT -->|Yes| DLL_TIME[get_events_filtered_by_time<br/>utils.py]:::optionalFeature
+    DLL_TIME --> DLL_DETECT
+    DLL_CONTEXT -->|No| DLL_DETECT
+    DLL_DETECT[detect_DLLHijack<br/>scanners.py]:::coreProcessing
+    
+    %% DLL Detection Logic
+    DLL_DETECT --> DLL_SCAN[Scan for Event ID 7<br/>DLL Load Events]:::coreProcessing
+    DLL_SCAN --> DLL_CHECK{DLL matches<br/>target or<br/>hijackable?}:::decision
+    DLL_CHECK -->|Yes| DLL_SCORE[score_dll_hijack_risk<br/>scanners.py]:::coreProcessing
+    DLL_SCORE --> DLL_FILTER[filter_high_confidence_detections<br/>threshold >= 40]:::coreProcessing
+    DLL_FILTER --> DLL_CONTEXT_FILTER{Context<br/>enabled?}:::decision
+    DLL_CONTEXT_FILTER -->|Yes| DLL_TIME_FILTER[filter_events_by_time<br/>utils.py]:::optionalFeature
+    DLL_TIME_FILTER --> DLL_RETURN
+    DLL_CONTEXT_FILTER -->|No| DLL_RETURN[Return results dict<br/>detected_events<br/>high_confidence_events<br/>context_events<br/>commands]:::coreProcessing
+    DLL_CHECK -->|No| DLL_RETURN
+    DLL_RETURN --> PRINT_RESULTS
+    
+    %% Unmanaged PowerShell Path
+    PS_TARGET -->|Yes| PS_INPUT[Get DLL name<br/>from user]:::optionalFeature
+    PS_INPUT --> PS_CONTEXT
+    PS_TARGET -->|No| PS_CONTEXT{Include<br/>context?}:::decision
+    PS_CONTEXT -->|Yes| PS_TIME[get_events_filtered_by_time<br/>utils.py]:::optionalFeature
+    PS_TIME --> PS_DETECT
+    PS_CONTEXT -->|No| PS_DETECT
+    PS_DETECT[detect_UnmanagedPowerShell<br/>scanners.py]:::coreProcessing
+    
+    %% PowerShell Detection Logic
+    PS_DETECT --> PS_SCAN[Scan for:<br/>Event ID 7 - CLR DLL loads<br/>Event ID 8/10 - Injection<br/>Event ID 3 - Network]:::coreProcessing
+    PS_SCAN --> PS_SCORE[score_unmanaged_powershell_risk<br/>scanners.py]:::coreProcessing
+    PS_SCORE --> PS_FILTER[filter_high_confidence_powershell_events<br/>threshold >= 40]:::coreProcessing
+    PS_FILTER --> PS_CONTEXT_FILTER{Context<br/>enabled?}:::decision
+    PS_CONTEXT_FILTER -->|Yes| PS_LOLBINS[Filter by LOLBins<br/>get_lolbins<br/>utils.py]:::optionalFeature
+    PS_LOLBINS --> PS_TIME_FILTER[filter_events_by_time<br/>utils.py]:::optionalFeature
+    PS_TIME_FILTER --> PS_RETURN
+    PS_CONTEXT_FILTER -->|No| PS_RETURN[Return results dict<br/>clr_events<br/>injection_events<br/>network_events<br/>high_confidence variants<br/>commands]:::coreProcessing
+    PS_RETURN --> PRINT_RESULTS
+    
+    %% LSASS Dump Path
+    LSASS_PATH{Include<br/>context?}:::decision
+    LSASS_PATH -->|Yes| SEC_PATH[Get security logs path<br/>from user]:::optionalFeature
+    SEC_PATH --> SEC_PARSE[security_evtx_parser<br/>converters.py]:::optionalFeature
+    SEC_PARSE --> LSASS_DETECT
+    LSASS_PATH -->|No| LSASS_DETECT
+    LSASS_DETECT[detect_LsassDump<br/>scanners.py]:::coreProcessing
+    
+    %% LSASS Detection Logic
+    LSASS_DETECT --> LSASS_SCAN[Scan for Event ID 10<br/>ProcessAccess to lsass.exe<br/>GrantedAccess = 0x001fffff]:::coreProcessing
+    LSASS_SCAN --> LSASS_SCORE[score_lsass_dump_risk<br/>scanners.py]:::coreProcessing
+    LSASS_SCORE --> LSASS_FILTER[filter_high_confidence_lsass_events<br/>threshold >= 40]:::coreProcessing
+    LSASS_FILTER --> LSASS_CONTEXT_FILTER{Context<br/>enabled?}:::decision
+    LSASS_CONTEXT_FILTER -->|Yes| LSASS_TIME_FILTER[filter_events_by_time<br/>utils.py]:::optionalFeature
+    LSASS_TIME_FILTER --> LSASS_RETURN
+    LSASS_CONTEXT_FILTER -->|No| LSASS_RETURN[Return results dict<br/>detected_events<br/>high_confidence_events<br/>context_events<br/>commands]:::coreProcessing
+    LSASS_RETURN --> PRINT_RESULTS
+    
+    %% Strange PPID Path
+    PPID_PATH[No context filtering<br/>for Strange PPID]:::coreProcessing
+    PPID_PATH --> PPID_DETECT[detect_strange_PPID<br/>scanners.py]:::coreProcessing
+    
+    %% Strange PPID Detection Logic
+    PPID_DETECT --> PPID_SCAN[Scan for Event ID 1<br/>Process Creation<br/>Check suspicious pairs]:::coreProcessing
+    PPID_SCAN --> PPID_CHECK{Parent-Child<br/>pair matches<br/>suspicious?}:::decision
+    PPID_CHECK -->|Yes| PPID_SCORE[score_strange_ppid_risk<br/>scanners.py]:::coreProcessing
+    PPID_SCORE --> PPID_FILTER[filter_high_confidence_ppid_events<br/>threshold >= 40]:::coreProcessing
+    PPID_FILTER --> PPID_RETURN[Return results dict<br/>detected_events<br/>high_confidence_events<br/>commands]:::coreProcessing
+    PPID_CHECK -->|No| PPID_RETURN
+    PPID_RETURN --> PRINT_RESULTS
+    
+    %% Output Processing
+    PRINT_RESULTS[print_detection_result<br/>scanners.py]:::outputGeneration
+    PRINT_RESULTS --> PRINT_SUMMARY[print_detection_summary<br/>scanners.py]:::outputGeneration
+    PRINT_SUMMARY --> EXPORT_CHOICE{Export<br/>results?}:::decision
+    
+    %% Export Options
+    EXPORT_CHOICE -->|json| EXPORT_JSON[export_results_to_json<br/>scanners.py]:::outputGeneration
+    EXPORT_CHOICE -->|csv| EXPORT_CSV[evtx_to_csv<br/>converters.py]:::outputGeneration
+    EXPORT_CHOICE -->|both| EXPORT_JSON
+    EXPORT_JSON --> SAVE_JSON_FILE[Save to:<br/>data/test/results/<br/>filename_detection_timestamp.json]:::outputGeneration
+    EXPORT_CSV --> SAVE_CSV_FILE[Save to:<br/>data/test/results/<br/>filename_timestamp.csv]:::outputGeneration
+    SAVE_JSON_FILE --> EXPORT_BOTH{Both<br/>formats?}:::decision
+    EXPORT_BOTH -->|Yes| EXPORT_CSV
+    EXPORT_BOTH -->|No| LOOP_BACK
+    SAVE_CSV_FILE --> LOOP_BACK
+    EXPORT_CHOICE -->|skip| LOOP_BACK
+    
+    %% Loop or Exit
+    LOOP_BACK[Return to main menu]:::coreProcessing
+    LOOP_BACK --> MENU
+    EXIT([Program Exit]):::entryExit
+    
+    %% External Data Sources
+    GITHUB_API[(GitHub API<br/>HijackLibs<br/>LOLBAS)]:::externalIntegration
+    EVTX_FILE[(Input:<br/>.evtx file)]:::externalIntegration
+    JSON_DATA[(Data Files:<br/>hijackable_dlls.json<br/>lolbins.json)]:::externalIntegration
+    RESULTS_DIR[(Output:<br/>data/test/results/)]:::externalIntegration
+    
+    %% Connect External Data Sources
+    FETCH_GITHUB -.->|API Request| GITHUB_API
+    GET_PATH -.->|User Input| EVTX_FILE
+    DLL_SCAN -.->|Load| JSON_DATA
+    PS_SCAN -.->|Load| JSON_DATA
+    SAVE_JSON_FILE -.->|Write| RESULTS_DIR
+    SAVE_CSV_FILE -.->|Write| RESULTS_DIR
