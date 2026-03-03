@@ -27,6 +27,13 @@ It provides detection capabilities for:
 - 🧨 **Unmanaged PowerShell Execution** - Identify CLR injection and PowerShell execution from non-standard processes
 - 🧠 **LSASS Dumping Attempts** - Detect attempts to dump LSASS memory for credential theft
 - 🧪 **Suspicious Parent-Child Process Relationships (Strange PPID)** - Identify unusual process creation patterns
+- 🔐 **Brute Force / Failed Login Attempts** - Detect repeated authentication failures and account lockout patterns
+- 🧹 **Event Log Clearing/Tampering** - Identify anti-forensics behavior such as log clearing or logging service disruption
+- ⚙️ **New Service Creation/Modification** - Detect suspicious service installation and persistence activity
+- ⏰ **Scheduled Task Creation/Modification** - Detect potential persistence via task scheduler abuse
+- 👤 **Account Manipulation** - Detect unauthorized account creation and privileged group membership changes
+
+In addition to raw detections, EVE supports **incident aggregation and cross-detection summaries** to reduce duplicate alerts and surface higher-signal incidents.
 
 All detections can be exported to **JSON or CSV format** for further analysis or reporting.
 
@@ -44,7 +51,7 @@ All detections can be exported to **JSON or CSV format** for further analysis or
   Export detection results to JSON, CSV, or both. Files saved to same directory as source EVTX file with automatic naming.
 
 - 🧪 **Comprehensive Unit Tests**  
-  28 unit tests validate all detection functions, risk scoring, and return value structure with 100% pass rate.
+  62 unit tests validate all detection functions, aggregation logic, risk scoring, and return value structure with 100% pass rate.
 
 - 🔄 **Automatic List Updates (24-hour cache)**  
   Hijackable DLLs and LOLBins lists auto-update from GitHub if older than 24 hours. Supports optional GitHub token for higher API rate limits.
@@ -52,12 +59,14 @@ All detections can be exported to **JSON or CSV format** for further analysis or
 - ⏱️ **Advanced Time-Based Filtering**  
   Filter detected events by time window. Supports flexible input formats:
   - `1m` = 1 minute, `30s` = 30 seconds, `1.5m` = 1.5 minutes
+  - Explicit `all` or blank entry for unlimited events from detection onwards
   - Both primary detections and context events filtered by specified window
-  - No time filter = show all events (default)
+  - Time-frame metadata exported with JSON (shows applied time window)
+  - Progressive event processing with 100-event checkpoint (user can continue loading)
 
 - 🎯 **Multi-Factor Risk Scoring**  
   Intelligent filtering of detections by suspicious behavior patterns:
-  - **DLL Hijacking**: Scores based on DLL location, process type, and loaded binary reputation (77 raw → ~8 high-confidence events)
+  - **DLL Hijacking**: Context-aware scoring distinguishes legitimate app-owned DLLs (+5) from suspicious cross-process loads (+30+) and user-writable locations (+50)
   - **Unmanaged PowerShell**: Type-specific scoring for CLR DLL loads, process injection patterns, and network anomalies
   - **LSASS Dump**: Scores by access rights, source process reputation, and user privilege levels
   - **Strange PPID**: Rates parent-child pairs by process type combinations and behavior indicators
@@ -135,7 +144,7 @@ eve-engine/
 │               └── StrangePPID.evtx   # Sample suspicious PPID events
 │
 ├── unit_tests/                        # Unit test suite
-│   └── test_scanners.py               # 18 tests covering all detections
+│   └── test_scanners.py               # 62 pytest tests covering all detections and aggregation
 │
 └── update_lists.py                    # Utility to update DLL/LOLBins lists from GitHub
 ```
@@ -149,30 +158,66 @@ cd engine
 python3 src/main.py
 ```
 
+### Runtime Flags
+
+The following behavior is now configured via CLI flags (defaults shown):
+
+- `--include-context` → Include context events (**default: No**)
+- `--incident-aggregation` → Aggregate detections into incidents (**default: No**)
+- `-e`, `--export-results` → Export format (`json`/`csv`/`both`) (**default: Skip**)
+- `-p`, `--evtx-path` → Sysmon `.evtx` path (**default: prompt interactively**)
+- `-d`, `--detections` → Detection selection like `1,3,5` or `1-5,9` (**default: menu interactively**)
+- `--target-dll` → Optional DLL filter for detections 1 and 2 (e.g., `clr.dll`)
+- `--security-evtx-path` → Optional Security `.evtx` path for LSASS context (detection 3)
+- `-l`, `--list-detections` → Show detection IDs/names and exit
+
+Optional export path can be provided as the second argument after export type:
+
+```bash
+python3 src/main.py --export-results json /path/to/output
+python3 src/main.py -e both /path/to/output
+```
+
 The program will:
 1. Prompt for an EVTX file path
 2. Display a menu with detection options
-3. Ask if you want to include context events
-4. Show results in the console
-5. Offer export options (JSON/CSV/both)
+3. Apply CLI flag behavior for context/aggregation/export (or defaults)
+4. Show results in the console (raw detections and/or aggregated incidents)
+
+**Menu behavior:**
+- If you do **not** pass `-d/--detections`, the interactive menu is shown.
+- If you pass `-d/--detections`, the run is non-interactive for detection selection, and EVE prints selected detection names before execution.
+
+### Quick Commands
+
+```bash
+# 1) Show detection map and exit
+python3 src/main.py -l
+
+# 2) Run non-interactive with explicit detections and JSON export
+python3 src/main.py -p /path/to/sysmon.evtx -d 1,3,5 --include-context --incident-aggregation -e json /path/to/output
+
+# 3) Run in interactive mode (menu-driven)
+python3 src/main.py
+```
 
 ### Example Workflow
 ```bash
-$ python3 src/main.py
-Provide path to Sysmon .evtx file:
-> /path/to/sysmon.evtx
+# Step 1: list available detections
+$ python3 src/main.py --list-detections
+1) DLL Hijacking
+2) Unmanaged PowerShell
+3) LSASS Dump
+...
 
-[Menu displayed with detection options]
+# Step 2: run selected detections non-interactively
+$ python3 src/main.py -p /path/to/sysmon.evtx -d 1-3 --include-context --incident-aggregation --target-dll clr.dll --security-evtx-path /path/to/security.evtx -e json /path/to/output
 
-Include context events in analysis? (Y/N):
-> y
+[Selected detections: 1 (DLL Hijacking), 2 (Unmanaged PowerShell), 3 (LSASS Dump)]
 
-[Results displayed]
+[Aggregated incident summary displayed]
 
-Export results to file? (json/csv/both/skip) [default: skip]:
-> json
-
-[+] JSON export successful: /path/to/sysmon_dll_hijacking.json
+[+] JSON export successful: /path/to/output/sysmon_dll_hijacking_<timestamp>.json
 ```
 
 ---
@@ -334,29 +379,120 @@ Exported files are saved to the **same directory as the source EVTX file** with 
 - Format: `{original_filename}_{detection_type}.json`
 - Example: `/path/to/sysmon.evtx` → `/path/to/sysmon_dll_hijacking.json`
 
-## 🧪 Testing
+### JSON Export Metadata
+All JSON exports include high-visibility metadata fields to support analyst workflows:
 
-Run the unit test suite:
-```bash
-cd /home/moonpie/Documents/GitHub/eve-engine
-PYTHONPATH=engine python3 -m unittest unit_tests.test_scanners -v
+**Always Included**:
+- `detection_type` - Detection name (e.g., "DLL Hijacking")
+- `export_date` - ISO timestamp of export
+- `time_frame_minutes` - Time window applied (null for unlimited)
+- `time_frame_used` - Human-readable time-frame description
+
+**High-Value Analyst Fields**:
+- `processes_involved` - Deduplicated list of process basenames involved in detections
+  - **Example**: `["cmd.exe", "dism.exe", "explorer.exe"]`
+  - **Use**: Quick identification of attack actors without examining individual events
+  - **DLL Hijacking**: Source of `Image` field
+  - **PowerShell**: Merged from `Image`, `SourceImage`, `TargetImage` fields
+
+- `dlls_targeted` - Deduplicated list of DLL basenames targeted/injected
+  - **Example**: `["mscoree.dll", "oleacc.dll", "wininet.dll"]`
+  - **Use**: Identify which libraries were abuse vectors
+  - **DLL Hijacking**: Source of `ImageLoaded` field
+  - **PowerShell**: Merged from CLR DLLs and injected target fields
+
+**Detection Counts**:
+- `total_events` / `clr_events` / `injection_events` / `network_events` - Raw detection counts
+- `high_confidence_events` - Events meeting risk threshold
+- `context_events` - Supporting events (if context filtering enabled)
+
+**Full Example**:
+```json
+{
+  "metadata": {
+    "detection_type": "DLL Hijacking",
+    "export_date": "2026-03-02T14:30:45.123456",
+    "total_events": 15,
+    "high_confidence_events": 3,
+    "context_events": 8,
+    "time_frame_minutes": 5.0,
+    "time_frame_used": "5.0 minute(s) from earliest detection",
+    "processes_involved": ["cmd.exe", "dism.exe", "explorer.exe"],
+    "dlls_targeted": ["mscoree.dll", "oleacc.dll", "wininet.dll"],
+    "extracted_commands": [...]
+  },
+  "detected_events": [
+    {
+      "EventID": 7,
+      "Computer": "HOSTNAME",
+      "Image": "C:\\ProgramData\\Dism.exe",
+      "ImageLoaded": "C:\\Windows\\System32\\wininet.dll",
+      "risk_score": 70,
+      "is_high_confidence": true
+    },
+    ...
+  ]
+}
 ```
 
-Expected output: All 18 tests pass ✓
 
-**Test Coverage:**
-- DLL Hijacking Detection (7 tests)
-- Unmanaged PowerShell Detection (3 tests)
-- LSASS Dump Detection (4 tests)
-- Strange PPID Detection (4 tests)
+## 🧪 Testing
+
+The project uses **pytest** (industry-standard Python testing framework) with 62 comprehensive tests.
+
+### Running Tests
+
+Activate the virtual environment, then run:
+```bash
+# Activate venv (if not already active)
+.venv\Scripts\activate  # Windows
+source .venv/bin/activate  # Linux/macOS
+
+# Run all tests with verbose output
+pytest unit_tests/test_scanners.py -v
+
+# Run specific test
+pytest unit_tests/test_scanners.py::test_dll_hijack_no_events -v
+```
+
+Expected output: **All 62 tests pass** ✓ (~0.35s execution time)
+
+### Test Coverage
+
+**Detection Functions (50 tests):**
+- DLL Hijacking Detection (10 tests)
+- Unmanaged PowerShell Execution (5 tests)
+- LSASS Dump Detection (6 tests)
+- Strange PPID Detection (7 tests)
+- Brute Force Detection (5 tests)
+- Event Log Clearing Detection (4 tests)
+- Service Creation Detection (5 tests)
+- Task Creation Detection (4 tests)
+- Account Manipulation Detection (6 tests)
+
+**Aggregation Functions (12 tests):**
+- `aggregate_incidents()` - Deduplication, grouping, risk filtering, timestamp tracking (8 tests)
+- `aggregate_all_detections()` - Multi-detection summary generation (1 test)
+- Edge cases: empty results, missing fields (3 tests)
 
 ### Test Details
-Each test validates detection functions independently by:
-- Mocking input data
-- Calling detection functions
-- Asserting on returned data structures
 
-No side effects, no file I/O, pure business logic testing.
+Each test validates detection and aggregation functions independently by:
+- Mocking input event data
+- Calling detection/aggregation functions
+- Using pytest assertions to verify return structures
+
+No side effects, no file I/O, pure business logic testing. Tests follow modern pytest conventions:
+- Function-based tests (no class inheritance)
+- Clear assert statements
+- Descriptive test names
+
+### Installation
+
+Pytest is specified in `requirements.txt`. It's installed automatically when you run:
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
@@ -411,7 +547,7 @@ The following detections are valuable but may only be partially implemented, and
 - Integration with Sigma rules
 - Real-time monitoring via ETW providers
 - Excel output support
-- CLI flags for non-interactive mode (--detection-type, --export-format, etc.)
+- Further CLI non-interactive expansion (e.g., security log path and DLL filter flags)
 - Web UI dashboard for visualization
 
 ---

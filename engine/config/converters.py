@@ -12,8 +12,13 @@ import xml.etree.ElementTree as ET
 
 def sysmon_evtx_parser(evtx_path):
 
-    # BUG: Creates 'CreateKey' somewhere in this logic when it finds no value/key
-    # SUSPICION: It may be that "name" in properties[] is a match but for a specific event this property name does not exist 
+    """
+    This function parses a Sysmon .evtx file and extracts relevant event data into a list of dictionaries. 
+    Each dictionary represents a single event record, with keys corresponding to the event's data fields (e.g., EventID, UtcTime, RuleName, etc.). 
+    The function handles both the standard XML structure of Sysmon events and potential variations in the timestamp format. 
+    It also includes error handling to catch and report any issues encountered during parsing, such as malformed XML or unexpected data formats. 
+    The resulting list of dictionaries can then be easily converted to a CSV file for further analysis or reporting.
+    """
 
     all_rows = []
     ns = {"ns0": "http://schemas.microsoft.com/win/2004/08/events/event"}
@@ -65,6 +70,12 @@ def sysmon_evtx_parser(evtx_path):
     return all_rows
 
 def security_evtx_parser(evtx_path):
+
+    """
+    This function parses a Security .evtx file and extracts relevant event data into a list of dictionaries. 
+    Each dictionary represents a single event record, with keys corresponding to the event's data fields (e.g., EventID, TimeCreated, etc.).
+    """
+
     all_rows = []
     ns = {"ns0": "http://schemas.microsoft.com/win/2004/08/events/event"}
 
@@ -111,13 +122,17 @@ def security_evtx_parser(evtx_path):
 
     return all_rows
 
-def evtx_to_csv(data_rows, evtx_path):
+def evtx_to_csv(data_rows, evtx_path, output_dir=None):
     event_data_fields = set()
     for row in data_rows:
         event_data_fields.update(row.keys())
 
-    # Save to results directory with timestamp
-    results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+    # Save to output directory (if provided) or default results directory
+    if output_dir:
+        results_dir = Path(output_dir)
+    else:
+        results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+
     results_dir.mkdir(parents=True, exist_ok=True)
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

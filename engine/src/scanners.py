@@ -44,50 +44,73 @@ def score_dll_hijack_risk(event):
     """
     Score the risk level of a DLL load event for potential hijacking.
     
-    Risk factors:
-    - DLL from non-system location (+40 points)
-    - Loading process is a LOLBin (+30 points)
-    - DLL in user-writable location like Downloads (+25 points)
-    - Parent process suspicious (+20 points if available)
+    Key insight from lab analysis: The attack pattern is a PROCESS loading a HIJACKABLE DLL,
+    especially when the process itself is in a suspicious location.
+    
+    Scoring Strategy:
+    1. BASE: Hijackable DLL being loaded = +40 (this is the primary signal)
+    2. PROCESS LOCATION: If loading process is in suspicious location = +30
+    3. LEGITIMATE APPS: If process loading own app's DLL (same root) = -35 (subtract suspicion)
+    
+    Examples:
+    - C:\\ProgramData\\Dism.exe loading wininet.dll: 40 + 30 = 70 (FLAGGED)
+    - msedge.exe loading msedge_elf.dll: 40 - 35 = 5 (legitimate)
+    - cmd.exe from Temp loading any hijackable DLL: 40 + 30 = 70 (FLAGGED)
     
     Returns: Risk score (0-100+), event with score added
     """
     risk_score = 0
     lolbins_lower = [b.lower() for b in _get_lolbins_list()]
+    hijackable_dlls_lower = [dll.lower() for dll in _get_hijackable_dlls_list()]
     
-    # Check DLL path location
-    image_loaded = event.get("ImageLoaded", "").lower()
-    system_paths = ["c:\\windows\\system32\\", "c:\\windows\\syswow64\\", "c:\\program files"]
-    
-    is_system_path = any(image_loaded.startswith(path) for path in system_paths)
-    if not is_system_path and image_loaded:
-        # DLL from non-standard location = high risk
-        risk_score += 40
-        
-        # Extra risk if from user-writable location
-        if "\\appdata\\" in image_loaded or "\\downloads\\" in image_loaded or "\\temp\\" in image_loaded:
-            risk_score += 25
-    
-    # Check loading process
     image = event.get("Image", "").lower()
+    image_loaded = event.get("ImageLoaded", "").lower()
     process_name = os.path.basename(image).lower()
-    
-    if process_name in lolbins_lower:
-        # LOLBin loading DLL = suspicious
-        risk_score += 30
-    
-    # Unusual processes loading system DLLs are also suspicious
-    # (e.g., Notepad loading clr.dll, cmd.exe loading crypt32.dll)
-    suspicious_process_dll_combos = {
-        "notepad.exe": ["clr.dll", "jscript.dll", "vbscript.dll"],
-        "svchost.exe": ["clr.dll", "powershell.exe"],
-        "explorer.exe": ["clr.dll", "jscript.dll"],
-    }
-    
     dll_name = os.path.basename(image_loaded).lower()
-    if process_name in suspicious_process_dll_combos:
-        if dll_name in suspicious_process_dll_combos[process_name]:
-            risk_score += 20
+    process_dir = os.path.dirname(image).lower()
+    dll_dir = os.path.dirname(image_loaded).lower()
+    
+    # ===== PRIMARY SIGNAL: IS IT A HIJACKABLE DLL? =====
+    if dll_name in hijackable_dlls_lower:
+        risk_score += 40  # Base score: hijackable DLL is being loaded
+    else:
+        # Not a hijackable DLL, minimal risk from DLL hijacking perspective
+        risk_score = 0
+    
+    # ===== PROCESS LOCATION ANALYSIS =====
+    # If the loading process itself is in a suspicious location, that's a major red flag
+    suspicious_process_locations = ["\\programdata\\", "\\appdata\\", "\\downloads\\", "\\temp\\", "\\users\\"]
+    process_in_suspicious_location = any(loc in process_dir for loc in suspicious_process_locations)
+    
+    if process_in_suspicious_location:
+        risk_score += 30  # Process from ProgramData, AppData, or other writable location
+    
+    # ===== LEGITIMATE APPLICATION EXCEPTION =====
+    # If a program is loading hijackable DLL from its own application directory (e.g., msedge.exe → msedge_elf.dll)
+    # then it's likely a legitimate self-load. Reduce suspicion.
+    def get_app_root(path):
+        """Extract app root directory from a path."""
+        if not path:
+            return path
+        parts = path.split("\\")
+        if "program files" in path:
+            for i, part in enumerate(parts):
+                if "program files" in part:
+                    # Return path up to 3 components after Program Files
+                    return "\\".join(parts[:min(i+3, len(parts))])
+        return path
+    
+    process_app_root = get_app_root(process_dir)
+    dll_app_root = get_app_root(dll_dir)
+    
+    if process_app_root and dll_app_root and process_app_root == dll_app_root:
+        # Same application directory: likely legitimate (e.g., app loading its own DLL)
+        risk_score = max(0, risk_score - 35)
+    
+    # ===== ADDITIONAL: LOLBINS LOADING HIJACKABLE DLLS =====
+    # If a LOLBin is loading a hijackable DLL, that's extra suspicious
+    if process_name in lolbins_lower and dll_name in hijackable_dlls_lower:
+        risk_score += 20
     
     # Add score to event for reporting
     event_with_score = dict(event)
@@ -432,6 +455,7 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=True):
 
     # ================== CONTEXT FILTERING PHASE ==================
     context_events = []
+    user_minutes = None
     if include_context and earliest_event_time and spotted_rows:
         context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
         
@@ -457,7 +481,8 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=True):
         "detection_type": "DLL Hijacking",
         "count": len(spotted_rows),
         "high_confidence_count": len(high_confidence_events),
-        "context_count": len(context_events)
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
     }
 
 def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False):
@@ -547,6 +572,7 @@ def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False
     context_events = []
     filtered_injection_events = []
     filtered_network_events = []
+    user_minutes = None
 
     if include_context and earliest_event_time and clr_hits:
         context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
@@ -604,7 +630,8 @@ def detect_UnmanagedPowerShell(data_rows, target_dll=None, include_context=False
         "high_confidence_injection_count": len(high_conf_injection),
         "network_count": len(filtered_network_events) if include_context else len(network_alerts),
         "high_confidence_network_count": len(high_conf_network),
-        "context_count": len(context_events)
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
     }
 
 
@@ -663,6 +690,7 @@ def detect_LsassDump(data_rows, include_context=False, security_logs_rows=None):
 
     # ================== CONTEXT FILTERING PHASE ==================
     context_events = []
+    user_minutes = None
     if include_context and earliest_dump_time and security_logs_rows:
         context_events, user_minutes = conf.get_events_filtered_by_time(security_logs_rows, earliest_dump_time)
         
@@ -688,7 +716,8 @@ def detect_LsassDump(data_rows, include_context=False, security_logs_rows=None):
         "detection_type": "LSASS Dump Attempt",
         "count": len(spotted_rows),
         "high_confidence_count": len(high_confidence_events),
-        "context_count": len(context_events)
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
     }
 
 
@@ -786,7 +815,495 @@ def detect_strange_PPID(data_rows):
         "commands": list(set(extracted_commands)),
         "detection_type": "Strange PPID",
         "count": len(spotted_rows),
-        "high_confidence_count": len(high_confidence_events)
+        "high_confidence_count": len(high_confidence_events),
+        "time_frame_minutes": None
+    }
+
+
+def detect_BruteForce(data_rows, include_context=False):
+    """
+    Detects brute force/failed login attempts by identifying multiple failed login events (Event ID 4625).
+    
+    Risk factors:
+    - Multiple failures from same source/user within short timeframe (+10 per additional failure)
+    - Failures on privileged accounts (+20)
+    - Lockout events (4740) (+30)
+    
+    Args:
+        data_rows: List of Security event dictionaries
+        include_context: If True, include context events
+    
+    Returns:
+        {
+            "detected_events": [...],           # Failed login events
+            "high_confidence_events": [...],    # Multiple failures from same source
+            "context_events": [...],
+            "earliest_time": datetime,
+            "detection_type": "Brute Force/Failed Logins",
+            "count": int,
+            "high_confidence_count": int,
+            "context_count": int
+        }
+    """
+    EVENT_FAILED_LOGON = '4625'
+    EVENT_ACCOUNT_LOCKOUT = '4740'
+    FAILURE_THRESHOLD = 3  # 3+ failures = suspicious
+    
+    spotted_rows = []
+    lockout_events = []
+    earliest_event_time = None
+    failure_counts = {}  # Track failures by user+source
+    
+    # ================== DETECTION PHASE ==================
+    for row in data_rows:
+        event_id = str(row.get("EventID", ""))
+        
+        # Capture failed login attempts
+        if event_id == EVENT_FAILED_LOGON:
+            target_user = row.get("TargetUserName", "").lower()
+            source_workstation = row.get("Workstation", row.get("Computer", "")).lower()
+            failure_reason = row.get("FailureReason", "")
+            status = row.get("Status", "")
+            sub_status = row.get("SubStatus", "")
+            
+            event_time = row.get("DateTime", "")
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
+                earliest_event_time = event_time
+            
+            spotted_rows.append(row)
+            
+            # Track failure counts by user+source combination
+            key = f"{target_user}@{source_workstation}"
+            failure_counts[key] = failure_counts.get(key, 0) + 1
+        
+        # Capture account lockouts (high severity)
+        elif event_id == EVENT_ACCOUNT_LOCKOUT:
+            lockout_events.append(row)
+            event_time = row.get("DateTime", "")
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
+                earliest_event_time = event_time
+            spotted_rows.append(row)
+    
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    user_minutes = None
+    if include_context and earliest_event_time and spotted_rows:
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+    
+    # ================== RISK SCORING PHASE ==================
+    # High-confidence: Events from users/sources with multiple failures
+    high_confidence_events = []
+    for event in spotted_rows:
+        risk_score = 0
+        event_id = str(event.get("EventID", ""))
+        
+        if event_id == EVENT_FAILED_LOGON:
+            target_user = event.get("TargetUserName", "").lower()
+            source_workstation = event.get("Workstation", event.get("Computer", "")).lower()
+            key = f"{target_user}@{source_workstation}"
+            
+            # +10 for each failure, +20 if privileged account
+            risk_score = failure_counts.get(key, 0) * 10
+            
+            privileged_accounts = ["administrator", "admin", "root", "domain", "guest"]
+            if any(priv in target_user for priv in privileged_accounts):
+                risk_score += 20
+        
+        elif event_id == EVENT_ACCOUNT_LOCKOUT:
+            # Lockouts are always high risk
+            risk_score = 50
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        
+        if risk_score >= 20:  # Lower threshold for brute force
+            high_confidence_events.append(event_copy)
+    
+    high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    
+    return {
+        "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "detection_type": "Brute Force/Failed Logins",
+        "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events),
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
+    }
+
+
+def detect_EventLogClearing(data_rows, include_context=False):
+    """
+    Detects event log clearing/tampering (Event IDs 1102, 1100).
+    
+    Event ID 1102: Security log cleared
+    Event ID 1100: Event logging service shutdown
+    
+    Args:
+        data_rows: List of Security event dictionaries
+        include_context: If True, include context events
+    
+    Returns:
+        {
+            "detected_events": [...],
+            "context_events": [...],
+            "earliest_time": datetime,
+            "detection_type": "Event Log Clearing/Tampering",
+            "count": int,
+            "context_count": int
+        }
+    """
+    EVENT_LOG_CLEARED = '1102'
+    EVENT_LOG_SERVICE_SHUTDOWN = '1100'
+    
+    spotted_rows = []
+    earliest_event_time = None
+    
+    # ================== DETECTION PHASE ==================
+    for row in data_rows:
+        event_id = str(row.get("EventID", ""))
+        
+        if event_id in [EVENT_LOG_CLEARED, EVENT_LOG_SERVICE_SHUTDOWN]:
+            spotted_rows.append(row)
+            event_time = row.get("DateTime", "")
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
+                earliest_event_time = event_time
+    
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    user_minutes = None
+    if include_context and earliest_event_time and spotted_rows:
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+    
+    return {
+        "detected_events": spotted_rows,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "detection_type": "Event Log Clearing/Tampering",
+        "count": len(spotted_rows),
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
+    }
+
+
+def detect_ServiceCreation(data_rows, include_context=False):
+    """
+    Detects service creation/modification (Event IDs 7045, 4697).
+    
+    Event ID 7045: Service installed (Sysmon Event)
+    Event ID 4697: A service was installed in the system (Security Event)
+    
+    Risk factors:
+    - Service binary from suspicious location (+30)
+    - Service name related to legitimate system tool (mimicry) (+20)
+    - Service with no description (+15)
+    
+    Args:
+        data_rows: List of event dictionaries
+        include_context: If True, include context events
+    
+    Returns:
+        {
+            "detected_events": [...],
+            "high_confidence_events": [...],
+            "context_events": [...],
+            "earliest_time": datetime,
+            "detection_type": "Service Creation",
+            "count": int,
+            "high_confidence_count": int,
+            "context_count": int
+        }
+    """
+    EVENT_SERVICE_INSTALL_SYSMON = '7045'
+    EVENT_SERVICE_INSTALL_SECURITY = '4697'
+    
+    spotted_rows = []
+    earliest_event_time = None
+    
+    # ================== DETECTION PHASE ==================
+    for row in data_rows:
+        event_id = str(row.get("EventID", ""))
+        
+        if event_id in [EVENT_SERVICE_INSTALL_SYSMON, EVENT_SERVICE_INSTALL_SECURITY]:
+            spotted_rows.append(row)
+            event_time = row.get("DateTime", "")
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
+                earliest_event_time = event_time
+    
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    user_minutes = None
+    if include_context and earliest_event_time and spotted_rows:
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+    
+    # ================== RISK SCORING PHASE ==================
+    high_confidence_events = []
+    suspicious_paths = ["\\temp\\", "\\appdata\\", "\\downloads\\", "\\users\\public\\", "\\users\\guest\\"]
+    legitimate_system_services = ["update", "security", "windows", "system", "defender", "driver"]
+    
+    for event in spotted_rows:
+        risk_score = 0
+        
+        # Check service binary path
+        service_path = event.get("ImagePath", event.get("ServicePath", "")).lower()
+        service_name = event.get("ServiceName", event.get("ServiceDisplayName", "")).lower()
+        
+        # Binary from suspicious location
+        if any(path in service_path for path in suspicious_paths):
+            risk_score += 40
+        elif service_path and not (":\\windows\\" in service_path or ":\\program files\\" in service_path):
+            risk_score += 20
+        
+        # Service name mimicking legitimate services
+        for legit_name in legitimate_system_services:
+            if legit_name in service_name and service_path and "system32" not in service_path:
+                risk_score += 15
+        
+        # No description is suspicious
+        description = event.get("ServiceDescription", "")
+        if not description:
+            risk_score += 10
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        
+        if risk_score >= 20:
+            high_confidence_events.append(event_copy)
+    
+    high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    
+    return {
+        "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "detection_type": "Service Creation",
+        "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events),
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
+    }
+
+
+def detect_ScheduledTaskCreation(data_rows, include_context=False):
+    """
+    Detects scheduled task creation/modification (Event ID 4698, Sysmon 1).
+    
+    Risk factors:
+    - Task action from suspicious location (+30)
+    - Task with suspicious triggers (+20)
+    - Task running as SYSTEM (+15)
+    - Hidden or obfuscated task name (+25)
+    
+    Args:
+        data_rows: List of event dictionaries
+        include_context: If True, include context events
+    
+    Returns:
+        {
+            "detected_events": [...],
+            "high_confidence_events": [...],
+            "context_events": [...],
+            "earliest_time": datetime,
+            "detection_type": "Scheduled Task Creation",
+            "count": int,
+            "high_confidence_count": int,
+            "context_count": int
+        }
+    """
+    EVENT_TASK_CREATED = '4698'
+    EVENT_PROCESS_CREATE = '1'  # Could also capture task execution
+    
+    spotted_rows = []
+    earliest_event_time = None
+    
+    # ================== DETECTION PHASE ==================
+    for row in data_rows:
+        event_id = str(row.get("EventID", ""))
+        
+        # Focus on scheduled task creation events
+        if event_id == EVENT_TASK_CREATED:
+            spotted_rows.append(row)
+            event_time = row.get("DateTime", "")
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
+                earliest_event_time = event_time
+    
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    user_minutes = None
+    if include_context and earliest_event_time and spotted_rows:
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+    
+    # ================== RISK SCORING PHASE ==================
+    high_confidence_events = []
+    suspicious_paths = ["\\temp\\", "\\appdata\\", "\\downloads\\", "\\users\\public\\"]
+    suspicious_keywords = ["hidden", "obfuscated", "encoded", "base64", "0x"]
+    
+    for event in spotted_rows:
+        risk_score = 0
+        
+        # Check task action path
+        task_action = event.get("TaskContent", event.get("Actions", "")).lower()
+        task_name = event.get("TaskName", "").lower()
+        
+        # Action from suspicious location
+        if any(path in task_action for path in suspicious_paths):
+            risk_score += 30
+        elif task_action and not (":\\windows\\" in task_action or ":\\program files\\" in task_action):
+            risk_score += 15
+        
+        # Hidden/obfuscated task name
+        if "__" in task_name or "hidden" in task_name or any(kw in task_action for kw in suspicious_keywords):
+            risk_score += 25
+        
+        # Running as SYSTEM
+        if "nt authority\\system" in event.get("TaskUserContext", "").lower():
+            risk_score += 15
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        
+        if risk_score >= 20:
+            high_confidence_events.append(event_copy)
+    
+    high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    
+    return {
+        "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "detection_type": "Scheduled Task Creation",
+        "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events),
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
+    }
+
+
+def detect_AccountManipulation(data_rows, include_context=False):
+    """
+    Detects account manipulation (Event IDs 4720, 4732, 4728).
+    
+    Event ID 4720: User account created
+    Event ID 4732: Member added to security-enabled local group
+    Event ID 4728: Member added to security-enabled global group
+    
+    Risk factors:
+    - New account created (+40)
+    - User added to Administrators group (+50)
+    - User added to Backup Operators or Domain Admins (+40)
+    - Multiple group additions for same user (+20)
+    
+    Args:
+        data_rows: List of Security event dictionaries
+        include_context: If True, include context events
+    
+    Returns:
+        {
+            "detected_events": [...],
+            "high_confidence_events": [...],
+            "context_events": [...],
+            "earliest_time": datetime,
+            "detection_type": "Account Manipulation",
+            "count": int,
+            "high_confidence_count": int,
+            "context_count": int
+        }
+    """
+    EVENT_ACCOUNT_CREATED = '4720'
+    EVENT_LOCAL_GROUP_MEMBER_ADDED = '4732'
+    EVENT_GLOBAL_GROUP_MEMBER_ADDED = '4728'
+    
+    spotted_rows = []
+    earliest_event_time = None
+    group_membership_counts = {}  # Track group additions per user
+    
+    # ================== DETECTION PHASE ==================
+    for row in data_rows:
+        event_id = str(row.get("EventID", ""))
+        
+        if event_id in [EVENT_ACCOUNT_CREATED, EVENT_LOCAL_GROUP_MEMBER_ADDED, EVENT_GLOBAL_GROUP_MEMBER_ADDED]:
+            spotted_rows.append(row)
+            event_time = row.get("DateTime", "")
+            if earliest_event_time is None or (event_time and event_time < earliest_event_time):
+                earliest_event_time = event_time
+            
+            # Track group membership changes
+            if event_id in [EVENT_LOCAL_GROUP_MEMBER_ADDED, EVENT_GLOBAL_GROUP_MEMBER_ADDED]:
+                member_name = row.get("MemberName", "").lower()
+                key = member_name
+                group_membership_counts[key] = group_membership_counts.get(key, 0) + 1
+    
+    # ================== CONTEXT FILTERING PHASE ==================
+    context_events = []
+    user_minutes = None
+    if include_context and earliest_event_time and spotted_rows:
+        context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
+        if user_minutes is not None and user_minutes > 0:
+            spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+    
+    # ================== RISK SCORING PHASE ==================
+    high_confidence_events = []
+    privileged_groups = ["administrators", "backupoperators", "domainadmins", "serveroperators", "accountoperators"]
+    
+    for event in spotted_rows:
+        risk_score = 0
+        event_id = str(event.get("EventID", ""))
+        
+        if event_id == EVENT_ACCOUNT_CREATED:
+            # New account = automatic suspicion
+            risk_score = 40
+            
+            # Check if account name is suspicious
+            new_account = event.get("TargetUserName", "").lower()
+            suspicious_names = ["guest", "test", "admin", "tmp", "temp", "backup"]
+            if any(name in new_account for name in suspicious_names):
+                risk_score += 20
+        
+        elif event_id in [EVENT_LOCAL_GROUP_MEMBER_ADDED, EVENT_GLOBAL_GROUP_MEMBER_ADDED]:
+            # Group membership additions
+            group_name = event.get("TargetGroupName", "").lower()
+            member_name = event.get("MemberName", "").lower()
+            
+            # Adding to privileged group = high risk
+            if any(priv_group in group_name for priv_group in privileged_groups):
+                risk_score = 50
+            else:
+                risk_score = 20
+            
+            # Multiple group additions for same user = higher risk
+            if group_membership_counts.get(member_name, 0) > 1:
+                risk_score += 20
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        
+        if risk_score >= 20:
+            high_confidence_events.append(event_copy)
+    
+    high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
+    
+    return {
+        "detected_events": spotted_rows,
+        "high_confidence_events": high_confidence_events,
+        "context_events": context_events,
+        "earliest_time": earliest_event_time,
+        "detection_type": "Account Manipulation",
+        "count": len(spotted_rows),
+        "high_confidence_count": len(high_confidence_events),
+        "context_count": len(context_events),
+        "time_frame_minutes": user_minutes
     }
 
 
@@ -945,15 +1462,21 @@ def print_detection_summary(result):
         print(f"Context events: {context_count}")
 
 
-def export_results_to_json(result, evtx_path=None):
+def export_results_to_json(result, evtx_path=None, output_dir=None):
     """
     Export detection results to JSON format.
     
     Args:
         result: Dict returned from a detect_* function
         evtx_path: Optional path to EVTX file for filename generation
+        output_dir: Optional directory path to save JSON file
     """
     context_events = result.get("context_events", [])
+    time_frame_minutes = result.get("time_frame_minutes")
+    if time_frame_minutes is None:
+        time_frame_used = "all events (no time limit)"
+    else:
+        time_frame_used = f"{time_frame_minutes} minute(s) from earliest detection"
     
     # Handle DLL Hijacking format (single detected_events)
     if "detected_events" in result:
@@ -962,6 +1485,9 @@ def export_results_to_json(result, evtx_path=None):
         
         # Mark high-confidence events
         all_events_with_confidence = []
+        processes_involved = set()
+        dlls_targeted = set()
+        
         for event in all_events:
             event_copy = event.copy()
             event_copy["is_high_confidence"] = any(
@@ -969,6 +1495,16 @@ def export_results_to_json(result, evtx_path=None):
                 for hc in high_confidence_events
             )
             all_events_with_confidence.append(event_copy)
+            
+            # Extract process name for summary
+            image = event_copy.get("Image", "")
+            if image:
+                processes_involved.add(os.path.basename(image.lower()))
+            
+            # Extract targeted DLL name for summary
+            image_loaded = event_copy.get("ImageLoaded", "")
+            if image_loaded:
+                dlls_targeted.add(os.path.basename(image_loaded.lower()))
         
         all_events_with_confidence.extend(context_events)
         
@@ -978,12 +1514,18 @@ def export_results_to_json(result, evtx_path=None):
             "total_events": result.get("count", 0),
             "high_confidence_events": result.get("high_confidence_count", 0),
             "context_events": len(context_events),
+            "time_frame_minutes": time_frame_minutes,
+            "time_frame_used": time_frame_used,
+            "processes_involved": sorted(list(processes_involved)),
+            "dlls_targeted": sorted(list(dlls_targeted)),
             "extracted_commands": result.get("commands", [])
         }
     
     # Handle Unmanaged PowerShell format (multiple event types)
     elif "clr_events" in result:
         all_events_with_confidence = []
+        processes_involved = set()
+        dlls_targeted = set()
         
         # Collect all event types with confidence flags
         for event in result.get("clr_events", []):
@@ -994,6 +1536,16 @@ def export_results_to_json(result, evtx_path=None):
                 for hc in result.get("high_confidence_clr_events", [])
             )
             all_events_with_confidence.append(event_copy)
+            
+            # Extract process name
+            image = event_copy.get("Image", "")
+            if image:
+                processes_involved.add(os.path.basename(image.lower()))
+            
+            # Extract targeted CLR DLL
+            clr_dll = event_copy.get("clr_dll", "")
+            if clr_dll:
+                dlls_targeted.add(os.path.basename(clr_dll.lower()))
         
         for event in result.get("injection_events", []):
             event_copy = event.copy()
@@ -1003,6 +1555,15 @@ def export_results_to_json(result, evtx_path=None):
                 for hc in result.get("high_confidence_injection_events", [])
             )
             all_events_with_confidence.append(event_copy)
+            
+            # Extract source and target process names
+            source_image = event_copy.get("SourceImage", "")
+            target_image = event_copy.get("TargetImage", "")
+            if source_image:
+                processes_involved.add(os.path.basename(source_image.lower()))
+            if target_image:
+                processes_involved.add(os.path.basename(target_image.lower()))
+                dlls_targeted.add(os.path.basename(target_image.lower()))
         
         for event in result.get("network_events", []):
             event_copy = event.copy()
@@ -1012,6 +1573,11 @@ def export_results_to_json(result, evtx_path=None):
                 for hc in result.get("high_confidence_network_events", [])
             )
             all_events_with_confidence.append(event_copy)
+            
+            # Extract process names
+            image = event_copy.get("Image", "")
+            if image:
+                processes_involved.add(os.path.basename(image.lower()))
         
         all_events_with_confidence.extend(context_events)
         
@@ -1025,6 +1591,10 @@ def export_results_to_json(result, evtx_path=None):
             "network_events": result.get("network_count", 0),
             "high_confidence_network": result.get("high_confidence_network_count", 0),
             "context_events": len(context_events),
+            "time_frame_minutes": time_frame_minutes,
+            "time_frame_used": time_frame_used,
+            "processes_involved": sorted(list(processes_involved)),
+            "dlls_targeted": sorted(list(dlls_targeted)),
             "extracted_commands": result.get("commands", [])
         }
     
@@ -1050,8 +1620,12 @@ def export_results_to_json(result, evtx_path=None):
         "events": events_serializable
     }
 
-    # Generate filename with timestamp and save to results directory
-    results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+    # Generate filename with timestamp and save to output directory (if provided)
+    if output_dir:
+        results_dir = Path(output_dir)
+    else:
+        results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+
     results_dir.mkdir(parents=True, exist_ok=True)
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1072,3 +1646,127 @@ def export_results_to_json(result, evtx_path=None):
     except Exception as e:
         print(f"\033[31m[-] JSON export failed: {e}\033[0m")
         return None
+
+# =====================================================
+# INCIDENT AGGREGATION FUNCTIONS (reduce noise)
+# =====================================================
+
+def aggregate_incidents(result, group_by_fields, min_incident_count=1, min_risk_score=40):
+    """
+    Aggregate detection events into unique incidents based on grouping fields.
+    Deduplicates events and creates incident summaries.
+    
+    Args:
+        result: Detection result dict with "detected_events" key
+        group_by_fields: Tuple of field names to group by (e.g., ('ParentImage', 'ImageLoaded'))
+        min_incident_count: Minimum event count to include incident (default: 1)
+        min_risk_score: Minimum risk score to include incident (default: 40)
+    
+    Returns:
+        Dict with incident summaries replacing raw events
+    """
+    incidents = {}
+    
+    # Group events by specified fields
+    for event in result.get("detected_events", []):
+        # Create composite key from specified fields
+        key_values = []
+        for field in group_by_fields:
+            key_values.append(str(event.get(field, "unknown")))
+        key = "|".join(key_values)
+        
+        # Initialize incident if not seen
+        if key not in incidents:
+            incidents[key] = {
+                "incident_key": key,
+                "group_fields": dict(zip(group_by_fields, key_values)),
+                "event_count": 0,
+                "first_seen": None,
+                "last_seen": None,
+                "max_risk_score": 0,
+                "sample_events": [],
+                "users": set(),
+                "computers": set()
+            }
+        
+        # Aggregate incident data
+        incidents[key]["event_count"] += 1
+        incidents[key]["max_risk_score"] = max(incidents[key]["max_risk_score"], event.get("risk_score", 0))
+        
+        # Track timestamps
+        event_time = event.get("DateTime")
+        if incidents[key]["first_seen"] is None or (event_time and event_time < incidents[key]["first_seen"]):
+            incidents[key]["first_seen"] = event_time
+        if incidents[key]["last_seen"] is None or (event_time and event_time > incidents[key]["last_seen"]):
+            incidents[key]["last_seen"] = event_time
+        
+        # Collect sample events (keep first 3 for reference)
+        if len(incidents[key]["sample_events"]) < 3:
+            incidents[key]["sample_events"].append(event)
+        
+        # Track unique users/computers
+        if "TargetUserName" in event:
+            incidents[key]["users"].add(event["TargetUserName"])
+        if "Computer" in event:
+            incidents[key]["computers"].add(event["Computer"])
+        if "Image" in event:
+            incidents[key]["computers"].add(event.get("Computer", "unknown"))
+    
+    # Convert sets to lists and filter by thresholds
+    incident_list = []
+    for incident in incidents.values():
+        # Apply filtering thresholds
+        if incident["event_count"] >= min_incident_count and incident["max_risk_score"] >= min_risk_score:
+            incident["users"] = list(incident["users"])
+            incident["computers"] = list(incident["computers"])
+            incident_list.append(incident)
+    
+    # Sort by risk score descending, then by event count
+    incident_list.sort(key=lambda x: (x["max_risk_score"], x["event_count"]), reverse=True)
+    
+    # Return aggregated result
+    aggregated_result = result.copy()
+    aggregated_result["detected_events"] = incident_list
+    aggregated_result["count"] = len(incident_list)
+    aggregated_result["total_raw_events"] = len(result.get("detected_events", []))
+    aggregated_result["is_aggregated"] = True
+    
+    return aggregated_result
+
+
+def aggregate_all_detections(results_list, detection_names):
+    """
+    Aggregate results from multiple detection runs into unified incident view.
+    
+    Args:
+        results_list: List of detection result dicts
+        detection_names: List of detection names corresponding to results
+    
+    Returns:
+        Summary dict with high-level incident metrics
+    """
+    summary = {
+        "detections": [],
+        "total_incidents": 0,
+        "total_raw_events": 0,
+        "high_risk_incidents": 0
+    }
+    
+    for result, name in zip(results_list, detection_names):
+        incident_count = result.get("count", 0)
+        raw_count = result.get("total_raw_events", 0) if result.get("is_aggregated") else incident_count
+        high_risk = sum(1 for event in result.get("detected_events", []) 
+                       if event.get("max_risk_score", 0) >= 60)
+        
+        summary["detections"].append({
+            "detection_type": name,
+            "incident_count": incident_count,
+            "raw_event_count": raw_count,
+            "high_risk_incidents": high_risk
+        })
+        
+        summary["total_incidents"] += incident_count
+        summary["total_raw_events"] += raw_count
+        summary["high_risk_incidents"] += high_risk
+    
+    return summary

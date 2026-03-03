@@ -672,6 +672,76 @@ Test Breakdown:
 
 ---
 
-**Version**: 2.0.3  
-**Release Date**: February 24, 2026  
+## 📝 Session Update: March 2, 2026
+
+### 1. **Enhanced Time-Frame Filtering UX**
+- Added explicit `all` keyword option (in addition to blank) for clarity
+- Updated prompt: "Or type 'all' / leave blank for no upper limit"
+- Maintains backward compatibility (blank still means unlimited)
+
+### 2. **Event Processing Threshold Increase**
+- Increased batch checkpoint from 20 to 100 events
+- Rationale: Reduces interruptions during normal analysis, especially with aggregation enabled
+- Message now dynamically uses `{max_events}` variable instead of hard-coded "20"
+
+### 3. **Fixed Event Counting Logic**
+- **Bug**: Event counting was skipped for time-range filtered events (when user specified e.g., "5m")
+- **Fix**: Added `event_count += 1` in all filtering paths
+- **Impact**: Users now see "Proceed?" prompt consistently after 100 events regardless of filtering mode
+
+### 4. **JSON Metadata Enhancement**
+- Export now includes time-frame context in metadata:
+  - `time_frame_minutes`: Numeric value (null for unlimited, or minutes selected)
+  - `time_frame_used`: Human-readable string (e.g., "5.0 minute(s) from earliest detection")
+- Enables audit trail of analysis window for compliance/reporting
+
+### 5. **DLL Hijacking Risk Scoring Refinement**
+**Problem**: Legitimate app activity (e.g., msedge.exe loading msedge_elf.dll) was scoring 25-30 points, producing false positives
+
+**Solution**: Context-aware scoring that distinguishes legitimate from malicious patterns:
+- Program loads own DLL (same app root): +5 points (legitimate)
+- Unrelated process loads Program Files DLL: +30 points (suspicious)
+- Program loads user-writable location: +50 points (very suspicious)
+- LOLBin behaviors properly weighted to catch real threats
+- Maintains threshold=40 without false positives
+
+**Result**: All 62 unit tests pass with refined scoring
+
+---
+
+**Version**: 2.0.4  
+**Release Date**: March 2, 2026  
+**Status**: Stable
+
+### 6. **JSON Export Metadata Enhancements**
+Added high-visibility metadata fields to support analyst workflows:
+
+- `processes_involved`: Sorted list of unique process basenames detected in incident
+  - **DLL Hijacking**: Extracted from `Image` field (loading process)
+  - **Unmanaged PowerShell**: Extracted from `Image`, `SourceImage`, `TargetImage` (all involved processes)
+  - Format: `["cmd.exe", "dism.exe", "powershell.exe"]` (lowercase, deduplicated)
+  - **Use Case**: Analysts can quickly identify attack actors without examining individual events
+
+- `dlls_targeted`: Sorted list of unique DLL basenames targeted in incident
+  - **DLL Hijacking**: Extracted from `ImageLoaded` field (hijacked DLL)
+  - **Unmanaged PowerShell**: Extracted from CLR DLLs and injected target DLLs
+  - Format: `["mscoree.dll", "ntdll.dll", "wininet.dll"]` (lowercase, deduplicated)
+  - **Use Case**: Analysts can identify which libraries were abuse vectors without examining individual events
+
+**Example JSON Metadata**:
+```json
+{
+  "detection_type": "DLL Hijacking",
+  "total_events": 15,
+  "high_confidence_events": 3,
+  "processes_involved": ["cmd.exe", "dism.exe", "explorer.exe"],
+  "dlls_targeted": ["mscoree.dll", "oleacc.dll", "wininet.dll"],
+  "time_frame_minutes": 5.0,
+  "time_frame_used": "5.0 minute(s) from earliest detection",
+  ...
+}
+```
+
+**Test Results**: All 62 unit tests pass with metadata enhancements integrated
+
 **Status**: Stable 
