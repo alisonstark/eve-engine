@@ -1821,7 +1821,7 @@ def export_results_to_json(result, evtx_path=None, output_dir=None):
     if output_dir:
         results_dir = Path(output_dir)
     else:
-        results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "output"
+        results_dir = Path(__file__).resolve().parent.parent / "data" / "output"
 
     results_dir.mkdir(parents=True, exist_ok=True)
     

@@ -114,41 +114,48 @@ eve-engine/
 ├── README.md                           # This file
 ├── requirements.txt                    # Python dependencies
 ├── LICENSE                             # Project license
+├── update_lists.py                     # Utility to update DLL/LOLBins lists from GitHub
 │
 ├── docs/                               # Documentation files
-│   └── changes_summary.md              # Detailed changelog and architecture notes
+│   ├── changes_summary.md              # Detailed changelog and architecture notes
+│   └── eve_application_flowchart.mmd   # Visual application flow and detection logic
 │
 ├── engine/                             # Main application directory
 │   ├── __init__.py
 │   │
 │   ├── src/                           # Application source code
 │   │   ├── main.py                    # User interaction & orchestration
-│   │   ├── scanners.py                # Detection functions + presentation layer
-│   │   └── converters.py              # EVTX parsing utilities
+│   │   └── scanners.py                # Detection functions + presentation layer
 │   │
 │   ├── config/                        # Configuration utilities
 │   │   ├── utils.py                   # Menu, file I/O, lazy-loaded lists
 │   │   ├── logprint.py                # Console formatting utilities
-│   │   └── converters.py              # EVTX/CSV conversion
+│   │   └── converters.py              # EVTX/CSV conversion utilities
 │   │
-│   └── data/                          # Reference data and test samples
-│       ├── hijackable_dlls.txt        # Known hijackable DLLs
-│       ├── lolbins.txt                # Living off the Land Binaries
-│       └── test/                      # Sample EVTX files for testing
-│           ├── DLLHijack/
-│           │   └── DLLHijack.evtx     # Sample DLL hijacking events
-│           ├── Dump/
-│           │   ├── LsassDump.evtx     # Sample LSASS dump events
-│           │   └── SecurityLogs.evtx  # Sample security logs
-│           ├── PowershellExec/
-│           │   └── PowershellExec.evtx # Sample PowerShell execution events
-│           └── StrangePPID/
-│               └── StrangePPID.evtx   # Sample suspicious PPID events
+│   └── data/                          # Reference data, test samples, and exports
+│       ├── hijackable_dlls.json       # Known hijackable DLLs (auto-updated from GitHub)
+│       ├── lolbins.json               # Living off the Land Binaries (auto-updated from GitHub)
+│       ├── manifest.json              # Metadata on generated test data
+│       ├── Generate-SecurityTestEvents.ps1  # High-volume test data generator (PowerShell)
+│       ├── output/                    # Generated JSON/CSV exports from detections
+│       └── test/                      # Sample and generated EVTX files
+│           ├── DLLHijack.evtx         # Sample DLL hijacking events
+│           ├── PowershellExec.evtx    # Sample unmanaged PowerShell execution
+│           ├── LsassDump.evtx         # Sample LSASS dump detection
+│           ├── StrangePPID.evtx       # Sample suspicious PPID events
+│           ├── brute_force.evtx       # Sample brute force/failed logins
+│           ├── log_cleared.evtx       # Sample event log clearing
+│           ├── service_system.evtx    # Sample service creation (System log)
+│           ├── service_security.evtx  # Sample service creation (Security log)
+│           ├── scheduled_task_operational.evtx  # Sample task creation (Operational log)
+│           ├── scheduled_task_security.evtx     # Sample task creation (Security log)
+│           ├── account_manipulation.evtx        # Sample account/group manipulation
+│           └── SecurityLogsLsass.evtx # Sample security logs for LSASS context
 │
 ├── unit_tests/                        # Unit test suite
 │   └── test_scanners.py               # 62 pytest tests covering all detections and aggregation
 │
-└── update_lists.py                    # Utility to update DLL/LOLBins lists from GitHub
+└── .git/                              # Git version control
 ```
 
 ---
@@ -315,6 +322,33 @@ The `engine/data/test/` directory contains sample EVTX files for testing and dem
 | `Dump/LsassDump.evtx` | LSASS Dump | Test LSASS memory dump detection |
 | `Dump/SecurityLogs.evtx` | Context Data | Security logs for context filtering |
 | `StrangePPID/StrangePPID.evtx` | Strange PPID | Test suspicious parent-child processes |
+
+### Generating Test Data with High-Volume Scenarios
+
+For comprehensive validation and detector tuning, the `Generate-SecurityTestEvents.ps1` PowerShell script creates realistic attack patterns with substantial noise:
+
+```powershell
+# Run with default settings (C:\SecurityTestEvtx output)
+PS> .\Generate-SecurityTestEvents.ps1
+
+# Specify custom output directory
+PS> .\Generate-SecurityTestEvents.ps1 -OutputDir "C:\MyTests"
+
+# Skip noise generation (minimal test files)
+PS> .\Generate-SecurityTestEvents.ps1 -SkipNoise
+
+# Run only specific scenarios (1=Brute Force, 2=Log Clear, 3=Services, 4=Tasks, 5=Accounts)
+PS> .\Generate-SecurityTestEvents.ps1 -ScenariosToRun @(1,3,5)
+```
+
+**What it generates**:
+- **Brute Force**: 80-120 failed logins + 200+ successful login noise (validates detection at scale)
+- **Service Creation**: 1-2 suspicious services + 15-25 legitimate operations
+- **Scheduled Tasks**: 1-2 suspicious tasks + 10-20 legitimate operations
+- **Account Manipulation**: 1-2 suspicious accounts + 50+ group query operations
+- **Log Clearing**: 1 critical event (low volume by nature)
+
+**Key advantage**: Tests detector accuracy against realistic noise levels. The script maintains version control compatibility for future detector improvements.
 
 ### Quick Test
 ```bash
