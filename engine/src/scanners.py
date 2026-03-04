@@ -79,8 +79,10 @@ def score_dll_hijack_risk(event):
     
     # ===== PROCESS LOCATION ANALYSIS =====
     # If the loading process itself is in a suspicious location, that's a major red flag
-    suspicious_process_locations = ["\\programdata\\", "\\appdata\\", "\\downloads\\", "\\temp\\", "\\users\\"]
-    process_in_suspicious_location = any(loc in process_dir for loc in suspicious_process_locations)
+    # Check for suspicious directory names anywhere in the path (case-insensitive)
+    suspicious_dirs = ["programdata", "appdata", "downloads", "temp", "users"]
+    process_path_parts = process_dir.split("\\")
+    process_in_suspicious_location = any(sus_dir in part.lower() for part in process_path_parts for sus_dir in suspicious_dirs)
     
     if process_in_suspicious_location:
         risk_score += 30  # Process from ProgramData, AppData, or other writable location
@@ -469,11 +471,18 @@ def detect_DLLHijack(data_rows, target_dll=None, include_context=True):
                 extracted_commands.append(cmdline)
 
     # ================== RISK SCORING PHASE ==================
+    # Score all detections first so downstream aggregation can use risk_score.
+    scored_detected_events = []
+    for event in spotted_rows:
+        _, scored_event = score_dll_hijack_risk(event)
+        scored_detected_events.append(scored_event)
+
     # Filter to high-confidence detections based on risk scoring
-    high_confidence_events = filter_high_confidence_detections(spotted_rows, threshold=40)
+    high_confidence_events = [event for event in scored_detected_events if event.get("risk_score", 0) >= 40]
+    high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
 
     return {
-        "detected_events": spotted_rows,
+        "detected_events": scored_detected_events,
         "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
@@ -904,8 +913,8 @@ def detect_BruteForce(data_rows, include_context=False):
             source_workstation = event.get("Workstation", event.get("Computer", "")).lower()
             key = f"{target_user}@{source_workstation}"
             
-            # +10 for each failure, +20 if privileged account
-            risk_score = failure_counts.get(key, 0) * 10
+            # +15 for each failure (3+ failures = 45+ points), +20 if privileged account
+            risk_score = failure_counts.get(key, 0) * 15
             
             privileged_accounts = ["administrator", "admin", "root", "domain", "guest"]
             if any(priv in target_user for priv in privileged_accounts):
@@ -923,8 +932,29 @@ def detect_BruteForce(data_rows, include_context=False):
     
     high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
     
+    # Score all detected events for aggregation
+    scored_detected_events = []
+    for event in spotted_rows:
+        risk_score = 0
+        event_id = str(event.get("EventID", ""))
+        
+        if event_id == EVENT_FAILED_LOGON:
+            target_user = event.get("TargetUserName", "").lower()
+            source_workstation = event.get("Workstation", event.get("Computer", "")).lower()
+            key = f"{target_user}@{source_workstation}"
+            risk_score = failure_counts.get(key, 0) * 10
+            privileged_accounts = ["administrator", "admin", "root", "domain", "guest"]
+            if any(priv in target_user for priv in privileged_accounts):
+                risk_score += 20
+        elif event_id == EVENT_ACCOUNT_LOCKOUT:
+            risk_score = 50
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        scored_detected_events.append(event_copy)
+    
     return {
-        "detected_events": spotted_rows,
+        "detected_events": scored_detected_events,
         "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
@@ -980,9 +1010,24 @@ def detect_EventLogClearing(data_rows, include_context=False):
         context_events, user_minutes = conf.get_events_filtered_by_time(data_rows, earliest_event_time)
         if user_minutes is not None and user_minutes > 0:
             spotted_rows = conf.filter_events_by_time(spotted_rows, earliest_event_time, user_minutes)
+
+    # ================== RISK SCORING PHASE ==================
+    scored_detected_events = []
+    for event in spotted_rows:
+        risk_score = 0
+        event_id = str(event.get("EventID", ""))
+
+        if event_id == EVENT_LOG_CLEARED:
+            risk_score = 80
+        elif event_id == EVENT_LOG_SERVICE_SHUTDOWN:
+            risk_score = 70
+
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        scored_detected_events.append(event_copy)
     
     return {
-        "detected_events": spotted_rows,
+        "detected_events": scored_detected_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
         "detection_type": "Event Log Clearing/Tampering",
@@ -1052,8 +1097,8 @@ def detect_ServiceCreation(data_rows, include_context=False):
     for event in spotted_rows:
         risk_score = 0
         
-        # Check service binary path
-        service_path = event.get("ImagePath", event.get("ServicePath", "")).lower()
+        # Check service binary path - Security log uses "ServiceFileName", System log uses "ImagePath"
+        service_path = event.get("ImagePath", event.get("ServicePath", event.get("ServiceFileName", ""))).lower()
         service_name = event.get("ServiceName", event.get("ServiceDisplayName", "")).lower()
         
         # Binary from suspicious location
@@ -1061,6 +1106,14 @@ def detect_ServiceCreation(data_rows, include_context=False):
             risk_score += 40
         elif service_path and not (":\\windows\\" in service_path or ":\\program files\\" in service_path):
             risk_score += 20
+        
+        # Encoded PowerShell commands (high risk) - increased to 35 for better obfuscation detection
+        if "-enc" in service_path or "-encodedcommand" in service_path or "frombase64" in service_path:
+            risk_score += 35
+        
+        # cmd.exe spawning PowerShell (common malware pattern) - increased to 25 for hollow process detection
+        if "cmd.exe" in service_path and "powershell" in service_path:
+            risk_score += 25
         
         # Service name mimicking legitimate services
         for legit_name in legitimate_system_services:
@@ -1080,8 +1133,47 @@ def detect_ServiceCreation(data_rows, include_context=False):
     
     high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
     
+    # Score all detected events for aggregation
+    scored_detected_events = []
+    suspicious_paths = ["\\temp\\", "\\appdata\\", "\\downloads\\", "\\users\\public\\", "\\users\\guest\\"]
+    legitimate_system_services = ["update", "security", "windows", "system", "defender", "driver"]
+    
+    for event in spotted_rows:
+        risk_score = 0
+        # Check multiple field names - Security log uses "ServiceFileName", System log uses "ImagePath"
+        service_path = event.get("ImagePath", event.get("ServicePath", event.get("ServiceFileName", event.get("Service File Name", "")))).lower()
+        service_name = event.get("ServiceName", event.get("ServiceDisplayName", "")).lower()
+        
+        # Binary from suspicious location
+        if any(path in service_path for path in suspicious_paths):
+            risk_score += 40
+        elif service_path and not (":\\windows\\" in service_path or ":\\program files\\" in service_path):
+            risk_score += 20
+        
+        # Encoded PowerShell commands (high risk) - increased to 35 for better obfuscation detection
+        if "-enc" in service_path or "-encodedcommand" in service_path or "frombase64" in service_path:
+            risk_score += 35
+        
+        # cmd.exe spawning PowerShell (common malware pattern) - increased to 25 for hollow process detection
+        if "cmd.exe" in service_path and "powershell" in service_path:
+            risk_score += 25
+        
+        # Service name mimicking legitimate services
+        for legit_name in legitimate_system_services:
+            if legit_name in service_name and service_path and "system32" not in service_path:
+                risk_score += 15
+        
+        # No description is suspicious
+        description = event.get("ServiceDescription", "")
+        if not description:
+            risk_score += 10
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        scored_detected_events.append(event_copy)
+    
     return {
-        "detected_events": spotted_rows,
+        "detected_events": scored_detected_events,
         "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
@@ -1095,7 +1187,7 @@ def detect_ServiceCreation(data_rows, include_context=False):
 
 def detect_ScheduledTaskCreation(data_rows, include_context=False):
     """
-    Detects scheduled task creation/modification (Event ID 4698, Sysmon 1).
+    Detects scheduled task creation/modification via Security log (4698) or Task Scheduler Operational log (106, 140, 107, 129).
     
     Risk factors:
     - Task action from suspicious location (+30)
@@ -1119,8 +1211,17 @@ def detect_ScheduledTaskCreation(data_rows, include_context=False):
             "context_count": int
         }
     """
-    EVENT_TASK_CREATED = '4698'
-    EVENT_PROCESS_CREATE = '1'  # Could also capture task execution
+    # Security log Event ID
+    EVENT_TASK_CREATED_SECURITY = '4698'
+    
+    # Task Scheduler Operational log Event IDs
+    EVENT_TASK_REGISTERED = '106'  # Task registered
+    EVENT_TASK_UPDATED = '140'     # Task updated
+    EVENT_TASK_ENABLED = '107'     # Task enabled
+    EVENT_TASK_CREATED_OP = '129'  # Task created (process launch)
+    
+    TASK_EVENT_IDS = [EVENT_TASK_CREATED_SECURITY, EVENT_TASK_REGISTERED, 
+                      EVENT_TASK_UPDATED, EVENT_TASK_ENABLED, EVENT_TASK_CREATED_OP]
     
     spotted_rows = []
     earliest_event_time = None
@@ -1129,8 +1230,8 @@ def detect_ScheduledTaskCreation(data_rows, include_context=False):
     for row in data_rows:
         event_id = str(row.get("EventID", ""))
         
-        # Focus on scheduled task creation events
-        if event_id == EVENT_TASK_CREATED:
+        # Focus on scheduled task creation/modification events from either log
+        if event_id in TASK_EVENT_IDS:
             spotted_rows.append(row)
             event_time = row.get("DateTime", "")
             if earliest_event_time is None or (event_time and event_time < earliest_event_time):
@@ -1151,10 +1252,19 @@ def detect_ScheduledTaskCreation(data_rows, include_context=False):
     
     for event in spotted_rows:
         risk_score = 0
+        event_id = str(event.get("EventID", ""))
         
-        # Check task action path
-        task_action = event.get("TaskContent", event.get("Actions", "")).lower()
+        # Base score: 45 for any task event (Operational log requires higher base due to field limitations)
+        if event_id in TASK_EVENT_IDS:
+            risk_score = 45
+        
+        # Check task action path - try multiple field names for different log sources
+        task_action = event.get("TaskContent", event.get("Actions", event.get("ActionCommand", ""))).lower()
         task_name = event.get("TaskName", "").lower()
+        
+        # For Operational log events (106, 140), task name is in different field
+        if not task_name:
+            task_name = event.get("Task Name", "").lower()
         
         # Action from suspicious location
         if any(path in task_action for path in suspicious_paths):
@@ -1166,8 +1276,9 @@ def detect_ScheduledTaskCreation(data_rows, include_context=False):
         if "__" in task_name or "hidden" in task_name or any(kw in task_action for kw in suspicious_keywords):
             risk_score += 25
         
-        # Running as SYSTEM
-        if "nt authority\\system" in event.get("TaskUserContext", "").lower():
+        # Running as SYSTEM or Highest privileges
+        user_context = event.get("TaskUserContext", event.get("User Context", event.get("UserContext", ""))).lower()
+        if "nt authority\\system" in user_context or "highest" in user_context:
             risk_score += 15
         
         event_copy = event.copy()
@@ -1178,8 +1289,47 @@ def detect_ScheduledTaskCreation(data_rows, include_context=False):
     
     high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
     
+    # Score all detected events for aggregation
+    scored_detected_events = []
+    suspicious_paths = ["\\temp\\", "\\appdata\\", "\\downloads\\", "\\users\\public\\"]
+    suspicious_keywords = ["hidden", "obfuscated", "encoded", "base64", "0x"]
+    
+    for event in spotted_rows:
+        risk_score = 0
+        event_id = str(event.get("EventID", ""))
+        
+        # Base score: 45 for any task event (same as high-confidence for consistency in aggregation)
+        if event_id in TASK_EVENT_IDS:
+            risk_score = 45
+        
+        task_action = event.get("TaskContent", event.get("Actions", event.get("ActionCommand", ""))).lower()
+        task_name = event.get("TaskName", "").lower()
+        
+        # For Operational log events (106, 140), task name is in different field
+        if not task_name:
+            task_name = event.get("Task Name", "").lower()
+        
+        # Action from suspicious location
+        if any(path in task_action for path in suspicious_paths):
+            risk_score += 30
+        elif task_action and not (":\\windows\\" in task_action or ":\\program files\\" in task_action):
+            risk_score += 15
+        
+        # Hidden/obfuscated task name
+        if "__" in task_name or "hidden" in task_name or any(kw in task_action for kw in suspicious_keywords):
+            risk_score += 25
+        
+        # Running as SYSTEM or Highest privileges
+        user_context = event.get("TaskUserContext", event.get("User Context", event.get("UserContext", ""))).lower()
+        if "nt authority\\system" in user_context or "highest" in user_context:
+            risk_score += 15
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        scored_detected_events.append(event_copy)
+    
     return {
-        "detected_events": spotted_rows,
+        "detected_events": scored_detected_events,
         "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
@@ -1262,29 +1412,34 @@ def detect_AccountManipulation(data_rows, include_context=False):
         event_id = str(event.get("EventID", ""))
         
         if event_id == EVENT_ACCOUNT_CREATED:
-            # New account = automatic suspicion
-            risk_score = 40
+            # New account = base suspicion increased to 50
+            risk_score = 50
             
             # Check if account name is suspicious
-            new_account = event.get("TargetUserName", "").lower()
-            suspicious_names = ["guest", "test", "admin", "tmp", "temp", "backup"]
-            if any(name in new_account for name in suspicious_names):
+            new_account = event.get("TargetUserName", event.get("SamAccountName", "")).lower()
+            suspicious_patterns = ["guest", "test", "admin", "tmp", "temp", "backup", "svc_", "_svc", "default"]
+            if any(pattern in new_account for pattern in suspicious_patterns):
                 risk_score += 20
         
         elif event_id in [EVENT_LOCAL_GROUP_MEMBER_ADDED, EVENT_GLOBAL_GROUP_MEMBER_ADDED]:
-            # Group membership additions
+            # Group membership additions - boost privileged group base to 60
             group_name = event.get("TargetGroupName", "").lower()
             member_name = event.get("MemberName", "").lower()
             
             # Adding to privileged group = high risk
             if any(priv_group in group_name for priv_group in privileged_groups):
-                risk_score = 50
+                risk_score = 60  # Increased from 50
             else:
                 risk_score = 20
             
             # Multiple group additions for same user = higher risk
             if group_membership_counts.get(member_name, 0) > 1:
                 risk_score += 20
+            
+            # Suspicious account names being elevated
+            suspicious_patterns = ["guest", "svc_", "_svc", "backup", "admin", "default"]
+            if any(pattern in member_name for pattern in suspicious_patterns):
+                risk_score += 15  # Increased from 10
         
         event_copy = event.copy()
         event_copy["risk_score"] = risk_score
@@ -1294,8 +1449,50 @@ def detect_AccountManipulation(data_rows, include_context=False):
     
     high_confidence_events.sort(key=lambda e: e.get("risk_score", 0), reverse=True)
     
+    # Score all detected events for aggregation
+    scored_detected_events = []
+    privileged_groups = ["administrators", "backupoperators", "domainadmins", "serveroperators", "accountoperators"]
+    
+    for event in spotted_rows:
+        risk_score = 0
+        event_id = str(event.get("EventID", ""))
+        
+        if event_id == EVENT_ACCOUNT_CREATED:
+            # New account = base suspicion increased to 50 (better detection)
+            risk_score = 50
+            
+            # Check if account name is suspicious
+            new_account = event.get("TargetUserName", event.get("SamAccountName", "")).lower()
+            suspicious_patterns = ["guest", "test", "admin", "tmp", "temp", "backup", "svc_", "_svc", "default"]
+            if any(pattern in new_account for pattern in suspicious_patterns):
+                risk_score += 20
+        
+        elif event_id in [EVENT_LOCAL_GROUP_MEMBER_ADDED, EVENT_GLOBAL_GROUP_MEMBER_ADDED]:
+            # Group membership additions - boost privileged group base score to 60
+            group_name = event.get("TargetGroupName", "").lower()
+            member_name = event.get("MemberName", "").lower()
+            
+            # Adding to privileged group = high risk
+            if any(priv_group in group_name for priv_group in privileged_groups):
+                risk_score = 60  # Increased from 50 to 60
+            else:
+                risk_score = 20
+            
+            # Multiple group additions for same user = higher risk
+            if group_membership_counts.get(member_name, 0) > 1:
+                risk_score += 20
+            
+            # Suspicious account names being elevated
+            suspicious_patterns = ["guest", "svc_", "_svc", "backup", "admin", "default"]
+            if any(pattern in member_name for pattern in suspicious_patterns):
+                risk_score += 15  # Increased from 10 to 15
+        
+        event_copy = event.copy()
+        event_copy["risk_score"] = risk_score
+        scored_detected_events.append(event_copy)
+    
     return {
-        "detected_events": spotted_rows,
+        "detected_events": scored_detected_events,
         "high_confidence_events": high_confidence_events,
         "context_events": context_events,
         "earliest_time": earliest_event_time,
@@ -1624,7 +1821,7 @@ def export_results_to_json(result, evtx_path=None, output_dir=None):
     if output_dir:
         results_dir = Path(output_dir)
     else:
-        results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "results"
+        results_dir = Path(__file__).resolve().parent.parent / "data" / "test" / "output"
 
     results_dir.mkdir(parents=True, exist_ok=True)
     

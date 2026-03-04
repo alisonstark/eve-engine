@@ -112,9 +112,11 @@ pip install -r requirements.txt
 ```
 eve-engine/
 ├── README.md                           # This file
-├── changes_summary.md                  # Detailed changelog and architecture notes
 ├── requirements.txt                    # Python dependencies
 ├── LICENSE                             # Project license
+│
+├── docs/                               # Documentation files
+│   └── changes_summary.md              # Detailed changelog and architecture notes
 │
 ├── engine/                             # Main application directory
 │   ├── __init__.py
@@ -554,7 +556,7 @@ The following detections are valuable but may only be partially implemented, and
 
 ## 📚 Documentation
 
-- **[changes_summary.md](./changes_summary.md)** - Detailed changelog, architectural decisions, and migration guide for v2.0.0
+- **[changes_summary.md](./docs/changes_summary.md)** - Detailed changelog, architectural decisions, and migration guide for v2.0.0
 
 ---
 

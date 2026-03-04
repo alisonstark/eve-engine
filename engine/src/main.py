@@ -5,6 +5,7 @@
 from pathlib import Path
 import sys
 import argparse
+import pprint
 
 # Add the root directory to sys.path so 'engine' module can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -76,6 +77,11 @@ def parse_cli_args():
         action="store_true",
         help="List detection options and exit"
     )
+    parser.add_argument(
+        "--high-risk-only",
+        action="store_true",
+        help="Filter aggregated incidents to only high-risk threats (score >= 70)"
+    )
 
     args = parser.parse_args()
 
@@ -99,6 +105,7 @@ def parse_cli_args():
         if detection_numbers is None:
             parser.error("--detections must use numbers 1-9 with comma/range format (e.g., '1,3,5' or '1-5,9')")
 
+    evtx_path = None
     if args.evtx_path:
         evtx_path = args.evtx_path.strip()
         if not evtx_path.lower().endswith(".evtx"):
@@ -121,32 +128,14 @@ def parse_cli_args():
         args.incident_aggregation,
         export_choice,
         export_output_dir,
-        args.evtx_path,
+        evtx_path,
         detection_numbers,
         target_dll,
         security_evtx_path,
-        args.list_detections
+        args.list_detections,
+        args.high_risk_only
     )
 
-
-(
-    include_context_flag,
-    incident_mode_flag,
-    export_choice_flag,
-    export_output_dir_flag,
-    evtx_path_flag,
-    detection_numbers_flag,
-    target_dll_flag,
-    security_evtx_path_flag,
-    list_detections_flag
-) = parse_cli_args()
-
-if list_detections_flag:
-    print_detection_catalog()
-    raise SystemExit(0)
-
-evtx_path = evtx_path_flag if evtx_path_flag else get_evtx_path()
-data_rows = sysmon_evtx_parser(evtx_path)
 
 # Grouping fields for incident aggregation by detection type
 INCIDENT_GROUPING = {
@@ -179,6 +168,34 @@ def apply_incident_aggregation(result, detection_num):
     aggregated = scan.aggregate_incidents(result, group_by_fields, min_incident_count=1, min_risk_score=40)
     
     return aggregated
+
+
+def filter_high_risk_incidents(result, min_risk_score=70):
+    """
+    Filter aggregated incidents to only high-risk threats.
+    
+    Args:
+        result: Detection result dict with aggregated incidents
+        min_risk_score: Minimum risk score threshold (default: 70)
+    
+    Returns:
+        Filtered result dict with only high-risk incidents
+    """
+    if "detected_events" not in result or not result.get("is_aggregated"):
+        return result
+    
+    all_incidents = result.get("detected_events", [])
+    high_risk = [incident for incident in all_incidents if incident.get("max_risk_score", 0) >= min_risk_score]
+    
+    filtered_result = result.copy()
+    filtered_result["detected_events"] = high_risk
+    filtered_result["count"] = len(high_risk)
+    filtered_result["high_risk_count"] = len(high_risk)
+    filtered_result["filtered_by_risk"] = True
+    filtered_result["risk_filter_threshold"] = min_risk_score
+    
+    return filtered_result
+
 
 
 def run_detection(
@@ -290,7 +307,9 @@ def export_result_bundle(results, data_rows, evtx_path, export_choice, export_ou
                 )
 
 
-def run_selected_detections(detection_numbers, include_context, incident_mode, export_choice, export_output_dir, non_interactive=False):
+def run_selected_detections(detection_numbers, include_context, incident_mode, export_choice, export_output_dir, 
+                           data_rows, evtx_path, target_dll_flag=None, security_evtx_path_flag=None, 
+                           high_risk_only_flag=False, non_interactive=False):
     """Run one or more detections and optionally export results."""
     target_dll = target_dll_flag
 
@@ -325,11 +344,44 @@ def run_selected_detections(detection_numbers, include_context, incident_mode, e
         if result:
             if incident_mode:
                 result = apply_incident_aggregation(result, det_num)
-                print(f"\033[36m[*] Incident Aggregation: {result.get('total_raw_events', result.get('count', 0))} raw events → {result.get('count', 0)} incident(s)\033[0m")
+                
+                # Calculate high-risk count before filtering
+                all_incidents = result.get("detected_events", [])
+                high_risk_count = sum(1 for incident in all_incidents if incident.get("max_risk_score", 0) >= 70)
+                
+                # Apply high-risk filtering if requested
+                if high_risk_only_flag:
+                    result = filter_high_risk_incidents(result, min_risk_score=70)
 
             results.append((result, det_num))
-            scan.print_detection_result(result)
+            
+            # For aggregated incidents, print them directly; for raw detections, use normal printer
+            if incident_mode:
+                # Print aggregated incidents with their details
+                all_incidents = result.get("detected_events", [])
+                print(f"\n\033[1;36m=== {len(all_incidents)} Aggregated Incident(s) ===\033[0m")
+                for incident in all_incidents:
+                    risk_score = incident.get("max_risk_score", 0)
+                    print(f"\n\033[33m[RISK SCORE: {risk_score}]\033[0m")
+                    pprint.pprint(incident)
+            else:
+                scan.print_detection_result(result)
+            
             scan.print_detection_summary(result)
+            
+            if incident_mode:
+                all_incidents = result.get("detected_events", [])
+                high_risk = sum(1 for i in all_incidents if i.get("max_risk_score", 0) >= 70)
+                shown_count = result.get("count", 0)
+                total_raw = result.get("total_raw_events", result.get("count", 0))
+                
+                if high_risk_only_flag:
+                    print(f"\n\033[36m[*] Incident Aggregation: {total_raw} raw events -> {shown_count} HIGH-RISK incident(s) (filtered from {result.get('total_raw_events', 0)} total)\033[0m")
+                else:
+                    print(f"\n\033[36m[*] Incident Aggregation: {total_raw} raw events -> {shown_count} incident(s) ({high_risk} high-risk)\033[0m")
+                    if high_risk > 0:
+                        print(f"\033[33m[!] Found {high_risk} high-risk threat(s)! Re-run with --incident-aggregation --high-risk-only (drop --include-context for cleaner output).\033[0m")
+            
             print("\n" + "=" * 50 + "\n")
 
     if results:
@@ -339,78 +391,145 @@ def run_selected_detections(detection_numbers, include_context, incident_mode, e
         print("\033[31m[-] No detections completed.\033[0m")
 
 
-if detection_numbers_flag:
-    run_selected_detections(
-        detection_numbers_flag,
+def main():
+    """Main program entry point."""
+    (
         include_context_flag,
         incident_mode_flag,
         export_choice_flag,
         export_output_dir_flag,
-        non_interactive=True
-    )
-    raise SystemExit(0)
+        evtx_path_flag,
+        detection_numbers_flag,
+        target_dll_flag,
+        security_evtx_path_flag,
+        list_detections_flag,
+        high_risk_only_flag
+    ) = parse_cli_args()
 
+    if list_detections_flag:
+        print_detection_catalog()
+        raise SystemExit(0)
 
-while True:
-    # Display the menu and get the user's selection
-    selection = show_menu()
+    evtx_path = evtx_path_flag if evtx_path_flag else get_evtx_path()
+    data_rows = sysmon_evtx_parser(evtx_path)
 
-    if selection[0] == 11:
-        print("\033[32m[+] Exiting the program...\033[0m\n")
-        break
-
-    # Handle Run Multiple Detections flow
-    if selection[0] == 10:
-        detection_numbers = selection[1]  # List of detection numbers
-        include_context = include_context_flag
-        incident_mode = incident_mode_flag
+    if detection_numbers_flag:
         run_selected_detections(
-            detection_numbers,
-            include_context,
-            incident_mode,
+            detection_numbers_flag,
+            include_context_flag,
+            incident_mode_flag,
             export_choice_flag,
             export_output_dir_flag,
-            non_interactive=False
-        )
-        
-        continue
-
-    # Handle Single Detection flow (options 1-9)
-    include_context = include_context_flag
-    incident_mode = incident_mode_flag
-
-    # Call appropriate detection function
-    result = None
-    target_dll = selection[1]
-
-    if target_dll_flag:
-        target_dll = target_dll_flag
-
-    result = run_detection(
-        selection[0],
-        data_rows,
-        evtx_path,
-        security_evtx_parser,
-        target_dll=target_dll,
-        include_context=include_context,
-        non_interactive=False,
-        security_evtx_path=security_evtx_path_flag
-    )
-
-    # Print results if any detection occurred
-    if result:
-        # Apply incident aggregation if enabled
-        if incident_mode:
-            result = apply_incident_aggregation(result, selection[0])
-            print(f"\n\033[36m[*] Incident Aggregation: {result.get('total_raw_events', result.get('count', 0))} raw events → {result.get('count', 0)} incident(s)\033[0m\n")
-        
-        scan.print_detection_result(result)
-        scan.print_detection_summary(result)
-
-        export_result_bundle(
-            [(result, selection[0])],
             data_rows,
             evtx_path,
-            export_choice_flag,
-            export_output_dir_flag
+            target_dll_flag=target_dll_flag,
+            security_evtx_path_flag=security_evtx_path_flag,
+            high_risk_only_flag=high_risk_only_flag,
+            non_interactive=True
         )
+        raise SystemExit(0)
+
+
+    while True:
+        # Display the menu and get the user's selection
+        selection = show_menu()
+
+        if selection[0] == 11:
+            print("\033[32m[+] Exiting the program...\033[0m\n")
+            break
+
+        # Handle Run Multiple Detections flow
+        if selection[0] == 10:
+            detection_numbers = selection[1]  # List of detection numbers
+            include_context = include_context_flag
+            incident_mode = incident_mode_flag
+            run_selected_detections(
+                detection_numbers,
+                include_context,
+                incident_mode,
+                export_choice_flag,
+                export_output_dir_flag,
+                data_rows,
+                evtx_path,
+                target_dll_flag=target_dll_flag,
+                security_evtx_path_flag=security_evtx_path_flag,
+                high_risk_only_flag=high_risk_only_flag,
+                non_interactive=False
+            )
+            
+            continue
+
+        # Handle Single Detection flow (options 1-9)
+        include_context = include_context_flag
+        incident_mode = incident_mode_flag
+
+        # Call appropriate detection function
+        result = None
+        target_dll = selection[1]
+
+        if target_dll_flag:
+            target_dll = target_dll_flag
+
+        result = run_detection(
+            selection[0],
+            data_rows,
+            evtx_path,
+            security_evtx_parser,
+            target_dll=target_dll,
+            include_context=include_context,
+            non_interactive=False,
+            security_evtx_path=security_evtx_path_flag
+        )
+
+        # Print results if any detection occurred
+        if result:
+            # Apply incident aggregation if enabled
+            if incident_mode:
+                result = apply_incident_aggregation(result, selection[0])
+                
+                # Calculate high-risk count before filtering
+                all_incidents = result.get("detected_events", [])
+                high_risk_count = sum(1 for incident in all_incidents if incident.get("max_risk_score", 0) >= 70)
+                
+                # Apply high-risk filtering if requested
+                if high_risk_only_flag:
+                    result = filter_high_risk_incidents(result, min_risk_score=70)
+            
+            # For aggregated incidents, print them directly; for raw detections, use normal printer
+            if incident_mode:
+                # Print aggregated incidents with their details
+                all_incidents = result.get("detected_events", [])
+                print(f"\n\033[1;36m=== {len(all_incidents)} Aggregated Incident(s) ===\033[0m")
+                for incident in all_incidents:
+                    risk_score = incident.get("max_risk_score", 0)
+                    print(f"\n\033[33m[RISK SCORE: {risk_score}]\033[0m")
+                    pprint.pprint(incident)
+            else:
+                scan.print_detection_result(result)
+            
+            scan.print_detection_summary(result)
+            
+            if incident_mode:
+                all_incidents = result.get("detected_events", [])
+                high_risk = sum(1 for i in all_incidents if i.get("max_risk_score", 0) >= 70)
+                shown_count = result.get("count", 0)
+                total_raw = result.get("total_raw_events", result.get("count", 0))
+                
+                if high_risk_only_flag:
+                    print(f"\n\033[36m[*] Incident Aggregation: {total_raw} raw events -> {shown_count} HIGH-RISK incident(s) (filtered from {result.get('total_raw_events', 0)} total)\033[0m\n")
+                else:
+                    print(f"\n\033[36m[*] Incident Aggregation: {total_raw} raw events -> {shown_count} incident(s) ({high_risk} high-risk)\033[0m")
+                    if high_risk > 0:
+                        print(f"\033[33m[!] Found {high_risk} high-risk threat(s)! Re-run with --incident-aggregation --high-risk-only (drop --include-context for cleaner output).\033[0m\n")
+
+            export_result_bundle(
+                [(result, selection[0])],
+                data_rows,
+                evtx_path,
+                export_choice_flag,
+                export_output_dir_flag
+            )
+
+
+if __name__ == "__main__":
+    main()

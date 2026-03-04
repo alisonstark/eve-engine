@@ -1,0 +1,42 @@
+﻿{
+    "Scenarios":  [
+                      {
+                          "Scenario":  1,
+                          "Name":  "Brute Force",
+                          "File":  "C:\\SecurityTestEvtx\\20260303_232709_01_brute_force.evtx",
+                          "Events":  1084,
+                          "Target":  "300+ events (80-120 malicious + 200+ noise)"
+                      },
+                      {
+                          "Scenario":  2,
+                          "Name":  "Log Clearing",
+                          "File":  "C:\\SecurityTestEvtx\\20260303_232709_02_log_cleared.evtx",
+                          "Events":  1,
+                          "Target":  "1 event (critical by nature)"
+                      },
+                      {
+                          "Scenario":  3,
+                          "Name":  "Service Creation",
+                          "File":  "C:\\SecurityTestEvtx\\20260303_232709_03a_service_system.evtx, C:\\SecurityTestEvtx\\20260303_232709_03b_service_security.evtx",
+                          "Events":  7,
+                          "Target":  "50+ events (3 malicious + 50+ noise)"
+                      },
+                      {
+                          "Scenario":  4,
+                          "Name":  "Scheduled Task",
+                          "File":  "C:\\SecurityTestEvtx\\20260303_232709_04a_scheduled_task_operational.evtx, C:\\SecurityTestEvtx\\20260303_232709_04b_scheduled_task_security.evtx",
+                          "Events":  9,
+                          "Target":  "40+ events (3 malicious + 40+ noise)"
+                      },
+                      {
+                          "Scenario":  5,
+                          "Name":  "Account Manipulation",
+                          "File":  "C:\\SecurityTestEvtx\\20260303_232709_05_account_manipulation.evtx",
+                          "Events":  488,
+                          "Target":  "200+ events (10+ malicious + 150+ noise)"
+                      }
+                  ],
+    "GeneratedDate":  "2026-03-03 23:35:51",
+    "Generator":  "Generate-SecurityTestEvents.ps1 v2.0",
+    "TargetVolume":  "450+ events per scenario (matching DLLHijack.evtx)"
+}
