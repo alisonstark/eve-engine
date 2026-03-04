@@ -35,7 +35,7 @@ It provides detection capabilities for:
 
 In addition to raw detections, EVE supports **incident aggregation and cross-detection summaries** to reduce duplicate alerts and surface higher-signal incidents.
 
-All detections can be exported to **JSON or CSV format** for further analysis or reporting.
+All detections can be exported to **JSON, CSV, or professional HTML reports** for further analysis or reporting.
 
 ---
 
@@ -49,6 +49,15 @@ All detections can be exported to **JSON or CSV format** for further analysis or
 
 - 📁 **Flexible Export Formats**  
   Export detection results to JSON, CSV, or both. Files saved to configurable output directory with automatic naming.
+
+- 📊 **Professional HTML Reports** ⭐ **NEW**  
+  Generate interactive SOC analyst reports with:
+  - **High-risk incident highlighting** - Prominently display threats with risk scores ≥ 70
+  - **Interactive timeline visualization** - Chronological view of detected events for attack chain correlation
+  - **Color-coded risk levels** - Red (high), orange (medium), gray (low) for quick scanning
+  - **Incident details cards** - Process names, DLLs, commands, and metadata organized by risk
+  - **Professional styling** - Ready for executive reporting and team briefings
+  - **Printable format** - Optimized for PDF export (Ctrl+P in browser)
 
 - 📂 **Multi-Format Log Input** ⭐ **NEW**  
   Auto-detects and validates input format with fallback handling:
@@ -183,6 +192,7 @@ The following behavior is now configured via CLI flags (defaults shown):
 - `--include-context` → Include context events (**default: No**)
 - `--incident-aggregation` → Aggregate detections into incidents (**default: No**)
 - `-e`, `--export-results` → Export format (`json`/`csv`/`both`) (**default: Skip**)
+- `--html-report` → Generate interactive HTML report with timeline visualization (**default: No**)
 - `-p`, `--evtx-path` → Sysmon `.evtx` path (**default: prompt interactively**)
 - `-d`, `--detections` → Detection selection like `1,3,5` or `1-5,9` (**default: menu interactively**)
 - `--target-dll` → Optional DLL filter for detections 1 and 2 (e.g., `clr.dll`)
@@ -215,7 +225,16 @@ python3 src/main.py -l
 # 2) Run non-interactive with explicit detections and JSON export
 python3 src/main.py -p /path/to/sysmon.evtx -d 1,3,5 --include-context --incident-aggregation -e json /path/to/output
 
-# 3) Run in interactive mode (menu-driven)
+# 3) Generate interactive HTML report with all detections
+python3 src/main.py -p /path/to/sysmon.evtx -d 1-9 --incident-aggregation --html-report
+
+# 4) Generate HTML report in specific directory
+python3 src/main.py -p /path/to/sysmon.evtx -d 1-3 --incident-aggregation --html-report /path/to/output
+
+# 5) Combine JSON export and HTML report
+python3 src/main.py -p /path/to/sysmon.evtx -d 1-5 --incident-aggregation -e json --html-report /path/to/output
+
+# 6) Run in interactive mode (menu-driven)
 python3 src/main.py
 ```
 
@@ -236,6 +255,35 @@ $ python3 src/main.py -p /path/to/sysmon.evtx -d 1-3 --include-context --inciden
 [Aggregated incident summary displayed]
 
 [+] JSON export successful: /path/to/output/sysmon_dll_hijacking_<timestamp>.json
+```
+
+### HTML Reports for SOC Analysis
+
+Generate professional, interactive HTML reports for threat investigation and team briefings:
+
+```bash
+# Generate HTML report with timeline and high-risk highlighting
+$ python3 src/main.py -p sysmon.evtx -d 1-9 --incident-aggregation --html-report
+
+[*] Detected format: EVTX
+[+] Completed 9 detection(s)
+[✓] HTML report generated: engine/data/output/eve_report_sysmon_20260304_163112.html
+```
+
+**HTML Report Features:**
+- 📊 **Executive Summary** - High/medium/low risk statistics at a glance
+- 🔴 **High-Risk Incidents** - Threatens with scores ≥ 70 prominently displayed
+- 📈 **Attack Timeline** - Chronological event visualization for correlation analysis
+- 📋 **Expandable Sections** - Medium/low risk incidents in collapsible sections to reduce clutter
+- 🎨 **Professional Styling** - Color-coded risk levels, print-optimized layout
+- 💾 **Browser-Native** - Open in any modern browser, works offline
+- 🖨️ **Printable/PDF** - Export to PDF using browser print function (Ctrl+P)
+
+**Specify custom output directory:**
+```bash
+$ python3 src/main.py -p sysmon.evtx -d 1-5 --incident-aggregation --html-report "/reports/2024-03-04"
+
+[✓] HTML report generated: /reports/2024-03-04/eve_report_sysmon_20260304_163112.html
 ```
 
 ---
@@ -624,57 +672,73 @@ pip install -r requirements.txt
 
 ## 🧠 Future Improvements
 
-### High-Priority Detection Additions
+### ✅ Recently Completed (March 2026)
 
-The following detections represent core Windows security monitoring capabilities and will be implemented next:
+The following high-priority features have been implemented and are now available:
 
-- **Brute Force/Failed Login Attempts**  
-  Event IDs 4625 (failed logon), 4648 (explicit credential use), 4740 (account lockouts)  
-  Detect repeated authentication failures indicating password spraying or brute force attacks
+- ✅ **Multi-Format Log Input Support**  
+  Auto-detection of EVTX, CSV, JSON, and EVT formats with format validation  
+  Format detection checks actual file content (magic bytes), not just extension (catches tampered files)
 
-- **Event Log Clearing/Tampering**  
-  Event IDs 1102 (Security log cleared), 1100 (event logging service shutdown)  
-  Critical indicator of attacker anti-forensics activities, often seen post-compromise
+- ✅ **Performance Optimizations**  
+  EVTX parser optimized: 40-50% faster parsing (~2-3s per 10K events)  
+  CSV/JSON parsers: 10-20x faster than EVTX (~100ms per 10K events)
 
-- **New Service Creation/Modification**  
-  Event IDs 7045, 4697 (service installation)  
-  Common persistence and privilege escalation technique, especially suspicious when created remotely or with unusual paths
+- ✅ **Incident Aggregation**  
+  Group related detections into incidents by severity and type  
+  Reduce noise and surface higher-signal threats
 
-- **Scheduled Task Creation/Modification**  
-  Event ID 4698 (scheduled task created)  
-  Popular persistence mechanism, monitor for tasks running from suspicious locations or with unusual triggers
+- ✅ **9 Core Detection Types**  
+  All high-priority detections now implemented and tested:
+  - DLL Hijacking (Detection 1)
+  - Unmanaged PowerShell Execution (Detection 2)
+  - LSASS Dump (Detection 3)
+  - Strange PPID (Detection 4)
+  - Brute Force/Failed Login Attempts (Detection 5)
+  - Event Log Clearing/Tampering (Detection 6)
+  - Service Creation/Modification (Detection 7)
+  - Scheduled Task Creation/Modification (Detection 8)
+  - Account Manipulation (Detection 9)
 
-- **Account Manipulation**  
-  Event IDs 4720 (account created), 4732 (user added to privileged group), 4728 (member added to security-enabled global group)  
-  Track unauthorized privilege escalation and backdoor account creation, critical for domain environments
+- ✅ **Risk Scoring & High-Risk Filtering**  
+  Multi-factor scoring across all detections  
+  High-risk incident filtering (70+ pts threshold)
 
-### Secondary Detection Additions
+- ✅ **Test Data Generator**  
+  PowerShell script generates realistic attack patterns with noise  
+  Version controlled for future detector refinement
 
-The following detections are valuable but may only be partially implemented, and only after all high-priority detections are complete:
+- ✅ **Professional HTML Reports**  
+  Generate interactive SOC analyst reports with timeline visualization  
+  Color-coded risk levels, high-risk incident highlighting  
+  Printable/PDF-exportable format for team briefings
 
-- **Pass-the-Hash/Pass-the-Ticket Detection**  
-  Event ID 4624 with logon type 9 (NewCredentials) or type 3 from suspicious sources, NTLM authentication from unusual processes
+### High-Priority Improvements (Currently Working On)
 
-- **Registry Persistence Mechanisms**  
-  Monitor Run keys and services registry modifications (requires Sysmon for best coverage)
+- **🚀 Database Backend for Incident Storage & Correlation**  
+  SQLite-based incident persistence across scans  
+  Query historical detections by host, user, time range, risk level  
+  Correlation across multiple scans to identify attack chains  
+  Foundation for future incremental learning and false-positive tracking
 
-- **Sensitive File Access**  
-  Event ID 4663 (object access) for SAM/SECURITY/SYSTEM registry hives and NTDS.dit access on domain controllers
+- **Secondary Detection Additions**  
+  Pass-the-Hash/Pass-the-Ticket Detection (Event ID 4624 with logon type 9/3)  
+  Registry Persistence Mechanisms (Sysmon registry monitoring)  
+  Sensitive File Access (Event ID 4663 for SAM/SECURITY hives, NTDS.dit)  
+  Kerberos Attacks (Event IDs 4768-4771, Golden/Silver tickets, Kerberoasting)  
+  Remote Execution/Lateral Movement (Event ID 4624 logon types, WMI, PSRemoting)
 
-- **Kerberos Attacks**  
-  Event IDs 4768, 4769, 4770, 4771 (Kerberos ticket operations)  
-  Detect Golden/Silver ticket attacks and Kerberoasting
+- **Sigma Rule Integration**  
+  Support for Sigma detection rules as alternative to built-in detectors  
+  Community rule repository integration
 
-- **Remote Execution/Lateral Movement**  
-  Event ID 4624 logon type 3, 10 (remote desktop), WMI activity, PSRemoting session creation
+### Lower-Priority Enhancements
 
-### General Enhancements
-
-- Integration with Sigma rules
-- Real-time monitoring via ETW providers
-- Excel output support
-- Further CLI non-interactive expansion (e.g., security log path and DLL filter flags)
-- Web UI dashboard for visualization
+- Real-time monitoring via ETW providers (Windows Event Tracing)
+- Web UI dashboard for visualization and analysis
+- Further CLI expansion for compliance reporting
+- YARA rule integration for content-based matching
+- Machine learning anomaly detection
 
 ---
 

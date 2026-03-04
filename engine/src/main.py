@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from engine.src import scanners as scan
 from engine.config.utils import show_menu, get_evtx_path, parse_detection_selection
 from engine.config.converters import load_event_log, security_evtx_parser, sysmon_evtx_parser
+from engine.config.html_report import generate_html_report
 
 DETECTION_LABELS = {
     1: "DLL Hijacking",
@@ -82,6 +83,13 @@ def parse_cli_args():
         action="store_true",
         help="Filter aggregated incidents to only high-risk threats (score >= 70)"
     )
+    parser.add_argument(
+        "--html-report",
+        nargs="?",
+        const=None,
+        metavar="OUTPUT_DIR",
+        help="Generate HTML report with timeline visualization (optional output directory)"
+    )
 
     args = parser.parse_args()
 
@@ -123,6 +131,16 @@ def parse_cli_args():
         if not security_evtx_path.lower().endswith(".evtx"):
             parser.error("--security-evtx-path must point to a .evtx file")
 
+    html_report_dir = None
+    if args.html_report is not None:
+        # Flag was provided
+        if args.html_report:
+            # Directory was specified
+            html_report_dir = args.html_report.strip()
+        else:
+            # Flag provided without argument, use default (None means use default in html_report.py)
+            html_report_dir = ""
+
     return (
         args.include_context,
         args.incident_aggregation,
@@ -133,7 +151,8 @@ def parse_cli_args():
         target_dll,
         security_evtx_path,
         args.list_detections,
-        args.high_risk_only
+        args.high_risk_only,
+        html_report_dir
     )
 
 
@@ -280,11 +299,17 @@ def run_detection(
     return result
 
 
-def export_result_bundle(results, data_rows, evtx_path, export_choice, export_output_dir):
+def export_result_bundle(results, data_rows, evtx_path, export_choice, export_output_dir, html_report_dir=None):
     """Export one or more detection results based on export flags."""
-    if not results or export_choice == 'skip':
+    if not results or (export_choice == 'skip' and html_report_dir is None):
         return
 
+    # Generate HTML report if requested
+    if html_report_dir is not None:
+        html_file = generate_html_report(results, evtx_path, output_dir=html_report_dir)
+        print(f"\n\033[32m[✓] HTML report generated: {html_file}\033[0m")
+
+    # Generate JSON/CSV exports if requested
     for result, _ in results:
         if export_choice == 'json':
             scan.export_results_to_json(result, evtx_path, output_dir=export_output_dir)
@@ -309,7 +334,7 @@ def export_result_bundle(results, data_rows, evtx_path, export_choice, export_ou
 
 def run_selected_detections(detection_numbers, include_context, incident_mode, export_choice, export_output_dir, 
                            data_rows, evtx_path, target_dll_flag=None, security_evtx_path_flag=None, 
-                           high_risk_only_flag=False, non_interactive=False):
+                           high_risk_only_flag=False, html_report_dir=None, non_interactive=False):
     """Run one or more detections and optionally export results."""
     target_dll = target_dll_flag
 
@@ -386,7 +411,7 @@ def run_selected_detections(detection_numbers, include_context, incident_mode, e
 
     if results:
         print(f"\n\033[32m[+] Completed {len(results)} detection(s)\033[0m")
-        export_result_bundle(results, data_rows, evtx_path, export_choice, export_output_dir)
+        export_result_bundle(results, data_rows, evtx_path, export_choice, export_output_dir, html_report_dir)
     else:
         print("\033[31m[-] No detections completed.\033[0m")
 
@@ -403,7 +428,8 @@ def main():
         target_dll_flag,
         security_evtx_path_flag,
         list_detections_flag,
-        high_risk_only_flag
+        high_risk_only_flag,
+        html_report_dir_flag
     ) = parse_cli_args()
 
     if list_detections_flag:
@@ -431,6 +457,7 @@ def main():
             target_dll_flag=target_dll_flag,
             security_evtx_path_flag=security_evtx_path_flag,
             high_risk_only_flag=high_risk_only_flag,
+            html_report_dir=html_report_dir_flag,
             non_interactive=True
         )
         raise SystemExit(0)
@@ -460,6 +487,7 @@ def main():
                 target_dll_flag=target_dll_flag,
                 security_evtx_path_flag=security_evtx_path_flag,
                 high_risk_only_flag=high_risk_only_flag,
+                html_report_dir=html_report_dir_flag,
                 non_interactive=False
             )
             
@@ -533,7 +561,8 @@ def main():
                 data_rows,
                 evtx_path,
                 export_choice_flag,
-                export_output_dir_flag
+                export_output_dir_flag,
+                html_report_dir_flag
             )
 
 

@@ -1,0 +1,777 @@
+"""
+HTML Report Generator for EVE - Event Verification Engine
+
+Generates professional SOC analyst reports with:
+- High-risk incident highlights
+- Interactive timeline visualization
+- Attack chain correlation
+- Color-coded risk levels
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+import os
+
+
+def generate_html_report(results_list, evtx_path=None, output_dir=None):
+    """
+    Generate an HTML report from detection results.
+    
+    Args:
+        results_list: List of tuples [(result_dict, detection_num), ...]
+        evtx_path: Path to source EVTX file
+        output_dir: Optional output directory (default: engine/data/output)
+    
+    Returns:
+        Path to generated HTML file
+    """
+    # Prepare output directory
+    if output_dir:
+        output_path = Path(output_dir)
+    else:
+        # Default to engine/data/output
+        output_path = Path(__file__).parent.parent / "data" / "output"
+    
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Generate filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if evtx_path:
+        evtx_name = Path(evtx_path).stem
+        filename = f"eve_report_{evtx_name}_{timestamp}.html"
+    else:
+        filename = f"eve_report_{timestamp}.html"
+    
+    html_file = output_path / filename
+    
+    # Collect all incidents from results
+    all_incidents = []
+    detection_types = set()
+    
+    for result, detection_num in results_list:
+        detection_type = result.get("detection_type", f"Detection {detection_num}")
+        detection_types.add(detection_type)
+        
+        detected_events = result.get("detected_events", [])
+        
+        for event in detected_events:
+            incident = {
+                "detection_type": detection_type,
+                "detection_num": detection_num,
+                "risk_score": event.get("max_risk_score", event.get("risk_score", 0)),
+                "timestamp": event.get("TimeCreated", event.get("EventTime", "Unknown")),
+                "event": event,
+                "is_aggregated": "aggregated_events" in event
+            }
+            all_incidents.append(incident)
+    
+    # Sort incidents by risk score (descending) then by timestamp
+    all_incidents.sort(key=lambda x: (-x["risk_score"], x["timestamp"]))
+    
+    # Categorize by risk level
+    high_risk = [i for i in all_incidents if i["risk_score"] >= 70]
+    medium_risk = [i for i in all_incidents if 40 <= i["risk_score"] < 70]
+    low_risk = [i for i in all_incidents if i["risk_score"] < 40]
+    
+    # Generate HTML
+    html_content = generate_html_template(
+        all_incidents=all_incidents,
+        high_risk=high_risk,
+        medium_risk=medium_risk,
+        low_risk=low_risk,
+        detection_types=detection_types,
+        evtx_path=evtx_path,
+        timestamp=timestamp
+    )
+    
+    # Write to file
+    with open(html_file, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    return html_file
+
+
+def generate_html_template(all_incidents, high_risk, medium_risk, low_risk, 
+                          detection_types, evtx_path, timestamp):
+    """Generate the full HTML report template."""
+    
+    # Prepare timeline data for JavaScript
+    timeline_events = []
+    for incident in all_incidents:
+        try:
+            # Parse various timestamp formats
+            ts = incident["timestamp"]
+            if isinstance(ts, str):
+                # Try different formats
+                for fmt in ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%d %H:%M:%S.%f", 
+                           "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"]:
+                    try:
+                        dt = datetime.strptime(ts, fmt)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    continue  # Skip if can't parse
+            else:
+                continue
+            
+            # Determine color based on risk
+            if incident["risk_score"] >= 70:
+                color = "#dc3545"  # red
+                group = "HIGH RISK"
+            elif incident["risk_score"] >= 40:
+                color = "#fd7e14"  # orange
+                group = "MEDIUM RISK"
+            else:
+                color = "#6c757d"  # gray
+                group = "LOW RISK"
+            
+            timeline_events.append({
+                "start": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "content": f"{incident['detection_type']} (Score: {incident['risk_score']})",
+                "group": group,
+                "style": f"background-color: {color}; color: white; border-color: {color};"
+            })
+        except Exception:
+            continue
+    
+    timeline_json = json.dumps(timeline_events, indent=2)
+    
+    # Generate incident cards HTML
+    high_risk_html = generate_incident_cards(high_risk, "high")
+    medium_risk_html = generate_incident_cards(medium_risk, "medium")
+    low_risk_html = generate_incident_cards(low_risk, "low")
+    
+    # Build summary stats
+    total_incidents = len(all_incidents)
+    evtx_basename = Path(evtx_path).name if evtx_path else "Unknown"
+    
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EVE Security Analysis Report - {timestamp}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            color: #333;
+        }}
+        
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }}
+        
+        .header {{
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }}
+        
+        .header h1 {{
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }}
+        
+        .header .subtitle {{
+            font-size: 1.2em;
+            opacity: 0.9;
+        }}
+        
+        .metadata {{
+            background: #f8f9fa;
+            padding: 20px 40px;
+            border-bottom: 2px solid #dee2e6;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }}
+        
+        .metadata-item {{
+            display: flex;
+            flex-direction: column;
+        }}
+        
+        .metadata-label {{
+            font-weight: bold;
+            color: #6c757d;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }}
+        
+        .metadata-value {{
+            font-size: 1.1em;
+            color: #212529;
+        }}
+        
+        .summary-stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 30px 40px;
+            background: #fff;
+        }}
+        
+        .stat-card {{
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }}
+        
+        .stat-card:hover {{
+            transform: translateY(-4px);
+        }}
+        
+        .stat-card.high {{
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+            color: white;
+        }}
+        
+        .stat-card.medium {{
+            background: linear-gradient(135deg, #fd7e14 0%, #e8590c 100%);
+            color: white;
+        }}
+        
+        .stat-card.low {{
+            background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+            color: white;
+        }}
+        
+        .stat-card.total {{
+            background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+            color: white;
+        }}
+        
+        .stat-number {{
+            font-size: 3em;
+            font-weight: bold;
+            display: block;
+        }}
+        
+        .stat-label {{
+            font-size: 1em;
+            opacity: 0.9;
+            margin-top: 5px;
+        }}
+        
+        .section {{
+            padding: 30px 40px;
+            border-bottom: 1px solid #dee2e6;
+        }}
+        
+        .section-title {{
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            color: #212529;
+            border-left: 4px solid #007bff;
+            padding-left: 15px;
+        }}
+        
+        .section-title.high {{
+            border-left-color: #dc3545;
+            color: #dc3545;
+        }}
+        
+        .section-title.medium {{
+            border-left-color: #fd7e14;
+            color: #fd7e14;
+        }}
+        
+        .section-title.low {{
+            border-left-color: #6c757d;
+            color: #6c757d;
+        }}
+        
+        .timeline-container {{
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            min-height: 300px;
+            position: relative;
+        }}
+        
+        .timeline {{
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }}
+        
+        .timeline-item {{
+            display: flex;
+            gap: 15px;
+            padding: 15px;
+            background: white;
+            border-radius: 6px;
+            border-left: 4px solid #007bff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        
+        .timeline-item.high {{
+            border-left-color: #dc3545;
+        }}
+        
+        .timeline-item.medium {{
+            border-left-color: #fd7e14;
+        }}
+        
+        .timeline-item.low {{
+            border-left-color: #6c757d;
+        }}
+        
+        .timeline-time {{
+            flex-shrink: 0;
+            font-weight: bold;
+            color: #6c757d;
+            min-width: 180px;
+            font-family: 'Courier New', monospace;
+        }}
+        
+        .timeline-content {{
+            flex-grow: 1;
+        }}
+        
+        .timeline-title {{
+            font-weight: bold;
+            margin-bottom: 5px;
+        }}
+        
+        .timeline-score {{
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: bold;
+            margin-left: 10px;
+        }}
+        
+        .timeline-score.high {{
+            background: #dc3545;
+            color: white;
+        }}
+        
+        .timeline-score.medium {{
+            background: #fd7e14;
+            color: white;
+        }}
+        
+        .timeline-score.low {{
+            background: #6c757d;
+            color: white;
+        }}
+        
+        .incident-card {{
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        
+        .incident-card.high {{
+            border-left: 5px solid #dc3545;
+        }}
+        
+        .incident-card.medium {{
+            border-left: 5px solid #fd7e14;
+        }}
+        
+        .incident-card.low {{
+            border-left: 5px solid #6c757d;
+        }}
+        
+        .incident-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f8f9fa;
+        }}
+        
+        .incident-type {{
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #212529;
+        }}
+        
+        .risk-badge {{
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }}
+        
+        .risk-badge.high {{
+            background: #dc3545;
+            color: white;
+        }}
+        
+        .risk-badge.medium {{
+            background: #fd7e14;
+            color: white;
+        }}
+        
+        .risk-badge.low {{
+            background: #6c757d;
+            color: white;
+        }}
+        
+        .incident-details {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }}
+        
+        .detail-item {{
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }}
+        
+        .detail-label {{
+            font-weight: bold;
+            color: #6c757d;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }}
+        
+        .detail-value {{
+            color: #212529;
+            word-break: break-all;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }}
+        
+        .collapsible {{
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            padding: 12px;
+            width: 100%;
+            border: none;
+            text-align: left;
+            outline: none;
+            font-size: 1em;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            transition: background 0.3s;
+        }}
+        
+        .collapsible:hover {{
+            background: #0056b3;
+        }}
+        
+        .collapsible:after {{
+            content: '\\002B';
+            color: white;
+            font-weight: bold;
+            float: right;
+            margin-left: 5px;
+        }}
+        
+        .collapsible.active:after {{
+            content: "\\2212";
+        }}
+        
+        .content {{
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            background: #f8f9fa;
+            border-radius: 0 0 6px 6px;
+        }}
+        
+        .content.active {{
+            max-height: 2000px;
+            padding: 15px;
+        }}
+        
+        .footer {{
+            background: #212529;
+            color: white;
+            padding: 20px 40px;
+            text-align: center;
+        }}
+        
+        .footer a {{
+            color: #007bff;
+            text-decoration: none;
+        }}
+        
+        .no-incidents {{
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+            font-style: italic;
+        }}
+        
+        @media print {{
+            body {{
+                background: white;
+                padding: 0;
+            }}
+            
+            .container {{
+                box-shadow: none;
+            }}
+            
+            .collapsible {{
+                display: none;
+            }}
+            
+            .content {{
+                max-height: none !important;
+                display: block !important;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>⚠️ EVE Security Analysis Report</h1>
+            <div class="subtitle">Event Verification Engine - Threat Detection & Analysis</div>
+        </div>
+        
+        <!-- Metadata -->
+        <div class="metadata">
+            <div class="metadata-item">
+                <span class="metadata-label">Report Generated</span>
+                <span class="metadata-value">{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</span>
+            </div>
+            <div class="metadata-item">
+                <span class="metadata-label">Source File</span>
+                <span class="metadata-value">{evtx_basename}</span>
+            </div>
+            <div class="metadata-item">
+                <span class="metadata-label">Detection Types Run</span>
+                <span class="metadata-value">{', '.join(sorted(detection_types))}</span>
+            </div>
+            <div class="metadata-item">
+                <span class="metadata-label">Total Incidents</span>
+                <span class="metadata-value">{total_incidents}</span>
+            </div>
+        </div>
+        
+        <!-- Summary Statistics -->
+        <div class="summary-stats">
+            <div class="stat-card high">
+                <span class="stat-number">{len(high_risk)}</span>
+                <span class="stat-label">HIGH RISK<br>(Score ≥ 70)</span>
+            </div>
+            <div class="stat-card medium">
+                <span class="stat-number">{len(medium_risk)}</span>
+                <span class="stat-label">MEDIUM RISK<br>(Score 40-69)</span>
+            </div>
+            <div class="stat-card low">
+                <span class="stat-number">{len(low_risk)}</span>
+                <span class="stat-label">LOW RISK<br>(Score < 40)</span>
+            </div>
+            <div class="stat-card total">
+                <span class="stat-number">{total_incidents}</span>
+                <span class="stat-label">TOTAL INCIDENTS</span>
+            </div>
+        </div>
+        
+        <!-- Attack Timeline -->
+        <div class="section">
+            <h2 class="section-title">📊 Attack Timeline</h2>
+            <div class="timeline-container">
+                <div class="timeline" id="timeline">
+                    <!-- Timeline will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+        
+        <!-- High-Risk Incidents -->
+        <div class="section">
+            <h2 class="section-title high">🚨 HIGH-RISK INCIDENTS (IMMEDIATE ATTENTION REQUIRED)</h2>
+            {high_risk_html if high_risk else '<div class="no-incidents">✅ No high-risk incidents detected</div>'}
+        </div>
+        
+        <!-- Medium-Risk Incidents -->
+        <div class="section">
+            <button class="collapsible" onclick="toggleSection(this)">⚠️ MEDIUM-RISK INCIDENTS ({len(medium_risk)})</button>
+            <div class="content">
+                {medium_risk_html if medium_risk else '<div class="no-incidents">✅ No medium-risk incidents detected</div>'}
+            </div>
+        </div>
+        
+        <!-- Low-Risk Incidents -->
+        <div class="section">
+            <button class="collapsible" onclick="toggleSection(this)">ℹ️ LOW-RISK INCIDENTS ({len(low_risk)})</button>
+            <div class="content">
+                {low_risk_html if low_risk else '<div class="no-incidents">✅ No low-risk incidents detected</div>'}
+            </div>
+        </div>
+        
+        <!-- Footer -->
+        <div class="footer">
+            <p>Generated by <strong>EVE - Event Verification Engine</strong></p>
+            <p style="margin-top: 10px; font-size: 0.9em; opacity: 0.8;">
+                This report contains security incident analysis. Handle with appropriate confidentiality.
+            </p>
+        </div>
+    </div>
+    
+    <script>
+        // Timeline data
+        const timelineData = {timeline_json};
+        
+        // Populate timeline
+        function populateTimeline() {{
+            const timelineEl = document.getElementById('timeline');
+            
+            if (timelineData.length === 0) {{
+                timelineEl.innerHTML = '<div class="no-incidents">No timeline events to display</div>';
+                return;
+            }}
+            
+            // Group events by risk category
+            const groups = {{}};
+            timelineData.forEach(item => {{
+                if (!groups[item.group]) {{
+                    groups[item.group] = [];
+                }}
+                groups[item.group].push(item);
+            }});
+            
+            // Display in risk order: HIGH, MEDIUM, LOW
+            const order = ['HIGH RISK', 'MEDIUM RISK', 'LOW RISK'];
+            order.forEach(groupName => {{
+                if (groups[groupName]) {{
+                    groups[groupName].forEach(item => {{
+                        const riskClass = groupName.split(' ')[0].toLowerCase();
+                        const timelineItem = document.createElement('div');
+                        timelineItem.className = `timeline-item ${{riskClass}}`;
+                        timelineItem.innerHTML = `
+                            <div class="timeline-time">${{item.start}}</div>
+                            <div class="timeline-content">
+                                <div class="timeline-title">
+                                    ${{item.content}}
+                                    <span class="timeline-score ${{riskClass}}">${{groupName}}</span>
+                                </div>
+                            </div>
+                        `;
+                        timelineEl.appendChild(timelineItem);
+                    }});
+                }}
+            }});
+        }}
+        
+        // Toggle collapsible sections
+        function toggleSection(element) {{
+            element.classList.toggle('active');
+            const content = element.nextElementSibling;
+            content.classList.toggle('active');
+        }}
+        
+        // Initialize timeline on page load
+        document.addEventListener('DOMContentLoaded', function() {{
+            populateTimeline();
+        }});
+    </script>
+</body>
+</html>"""
+    
+    return html
+
+
+def generate_incident_cards(incidents, risk_level):
+    """Generate HTML for incident cards."""
+    if not incidents:
+        return ""
+    
+    html_parts = []
+    
+    for incident in incidents:
+        event = incident["event"]
+        detection_type = incident["detection_type"]
+        risk_score = incident["risk_score"]
+        timestamp = incident["timestamp"]
+        
+        # Extract key fields based on detection type
+        details = []
+        
+        # Common fields
+        if "Image" in event:
+            details.append(("Process", event["Image"]))
+        if "CommandLine" in event:
+            details.append(("Command Line", event["CommandLine"]))
+        if "ParentImage" in event:
+            details.append(("Parent Process", event["ParentImage"]))
+        if "User" in event:
+            details.append(("User", event["User"]))
+        if "ImageLoaded" in event:
+            details.append(("DLL Loaded", event["ImageLoaded"]))
+        if "TargetObject" in event:
+            details.append(("Registry Target", event["TargetObject"]))
+        if "TargetImage" in event:
+            details.append(("Target Process", event["TargetImage"]))
+        if "SourceImage" in event:
+            details.append(("Source Process", event["SourceImage"]))
+        if "EventID" in event:
+            details.append(("Event ID", event["EventID"]))
+        if "Computer" in event:
+            details.append(("Computer", event["Computer"]))
+        
+        # For aggregated incidents
+        if "aggregated_events" in event:
+            agg_count = len(event["aggregated_events"])
+            details.append(("Aggregated Events", f"{agg_count} related events"))
+        
+        # Generate details HTML
+        details_html = ""
+        for label, value in details:
+            details_html += f"""
+            <div class="detail-item">
+                <div class="detail-label">{label}</div>
+                <div class="detail-value">{value}</div>
+            </div>
+            """
+        
+        # Generate incident card
+        card_html = f"""
+        <div class="incident-card {risk_level}">
+            <div class="incident-header">
+                <div class="incident-type">{detection_type}</div>
+                <div class="risk-badge {risk_level}">RISK SCORE: {risk_score}</div>
+            </div>
+            <div class="detail-item">
+                <div class="detail-label">Timestamp</div>
+                <div class="detail-value">{timestamp}</div>
+            </div>
+            <div class="incident-details">
+                {details_html}
+            </div>
+        </div>
+        """
+        
+        html_parts.append(card_html)
+    
+    return "\n".join(html_parts)

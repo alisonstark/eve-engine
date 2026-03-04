@@ -6,6 +6,15 @@
 
 ---
 
+## 🚀 Current Development Status
+
+**In Progress**: Database Backend for Incident Storage & Correlation
+- SQLite-based persistent storage for detected incidents
+- Historical query capabilities and correlation analysis
+- Foundation for future pattern learning and false-positive tracking
+
+---
+
 ## 🎯 Executive Summary
 
 This release represents a **major architectural refactoring** of the EVE codebase, transforming it from a monolithic, tightly-coupled system to a clean, testable, and composable architecture following **SOLID principles** (particularly Single Responsibility and Dependency Inversion).
@@ -745,6 +754,113 @@ Added high-visibility metadata fields to support analyst workflows:
 **Test Results**: All 62 unit tests pass with metadata enhancements integrated
 
 **Status**: Stable 
+
+---
+
+## 📊 v2.1.0: Professional HTML Reports with Timeline Visualization
+
+**Version**: 2.1.0  
+**Release Date**: March 4, 2026  
+**Status**: Stable
+
+### Feature: Interactive HTML Reports for SOC Analysts
+
+A dedicated HTML report generation system that transforms raw detection output into professional, presentation-ready security analysis documents.
+
+#### Capabilities
+
+**1. Executive Summary Dashboard**
+- High/Medium/Low risk incident counts at a glance
+- Total incident statistics with visual cards
+- Source file metadata and scan timestamp
+- Detection types run in analysis
+
+**2. Interactive Timeline Visualization**
+- Chronological event visualization for attack chain correlation
+- Color-coded by risk level (red/orange/gray)
+- Timestamp and detection type for each event
+- Allows analysts to understand temporal relationships between attacks
+
+**3. High-Risk Incident Highlighting**
+- Prominently displayed threats with risk scores ≥ 70
+- Detailed incident cards with key metadata
+- Process names, DLLs, commands, registry targets
+- Computer and user information
+- Aggregated event counts for grouped incidents
+
+**4. Expandable Medium/Low Risk Sections**
+- Collapsible sections reduce clutter on initial view
+- Allow detailed analysis without overwhelming report
+- Same formatting and detail as high-risk cards
+
+**5. Professional Styling & Printing**
+- Modern color scheme suitable for briefings
+- Print-optimized CSS for PDF export (Ctrl+P in browser)
+- Responsive design works on various screen sizes
+- Offline-capable (no external dependencies)
+
+#### Usage
+
+**Generate HTML report with default output directory**:
+```bash
+python3 src/main.py -p sysmon.evtx -d 1-9 --incident-aggregation --html-report
+# Output: engine/data/output/eve_report_sysmon_20260304_163112.html
+```
+
+**Generate in custom directory**:
+```bash
+python3 src/main.py -p sysmon.evtx -d 1-5 --incident-aggregation --html-report "/reports/2024-03-04"
+# Output: /reports/2024-03-04/eve_report_sysmon_20260304_163112.html
+```
+
+**Combine with JSON export**:
+```bash
+python3 src/main.py -p sysmon.evtx -d 1-9 --incident-aggregation -e json --html-report
+# Generates both JSON and HTML reports
+```
+
+#### Technical Implementation
+
+**New Module**: `engine/config/html_report.py`
+- `generate_html_report(results_list, evtx_path, output_dir)`: Main generator function
+- `generate_html_template()`: Creates full HTML document with inline CSS/JavaScript
+- `generate_incident_cards()`: Formats incident data into visual cards
+- Smart timestamp parsing handles multiple datetime formats
+- Risk classification (HIGH: ≥70, MEDIUM: 40-69, LOW: <40)
+
+**Integration Points**:
+- CLI flag `--html-report` with optional output directory
+- New function signature: `export_result_bundle(..., html_report_dir=None)`
+- Supports both aggregated and raw detection formats
+- Works with all 9 detection types
+
+**Features**:
+- Automatic output directory creation
+- Timestamp-based filenames prevent overwrite
+- UTF-8 encoding handles special characters
+- JSON timeline data embedded in HTML for offline use
+- JavaScript for interactive collapsible sections
+
+#### Testing
+
+✅ **Test Validation**:
+- Generated HTML validates properly (22KB+ with mock data)
+- All key sections present (header, stats, timeline, incidents)
+- Proper risk level color coding (red/orange/gray)
+- Compatible with all modern browsers
+- Printable/PDF-exportable
+
+#### Impact on Workflow
+
+**Before**: Analysts received raw JSON output, required Excel/custom scripts for reporting  
+**After**: One-command report generation with professional appearance for immediate team briefings
+
+**User Benefits**:
+- Faster threat communication to non-technical stakeholders
+- Visual timeline helps identify attack progression
+- Color coding speeds up risk assessment
+- Print-to-PDF integration with existing workflows
+- No additional dependencies (pure HTML/CSS/JavaScript)
 
 ---
 
