@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from engine.src import scanners as scan
 from engine.config.utils import show_menu, get_evtx_path, parse_detection_selection
-from engine.config.converters import sysmon_evtx_parser, security_evtx_parser
+from engine.config.converters import load_event_log, security_evtx_parser, sysmon_evtx_parser
 
 DETECTION_LABELS = {
     1: "DLL Hijacking",
@@ -411,7 +411,13 @@ def main():
         raise SystemExit(0)
 
     evtx_path = evtx_path_flag if evtx_path_flag else get_evtx_path()
-    data_rows = sysmon_evtx_parser(evtx_path)
+    
+    # Use auto-detecting loader (handles EVTX, CSV, JSON formats)
+    try:
+        data_rows = load_event_log(evtx_path)
+    except ValueError as e:
+        print(f"{e}")
+        raise SystemExit(1)
 
     if detection_numbers_flag:
         run_selected_detections(
