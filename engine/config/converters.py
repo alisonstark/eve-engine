@@ -44,9 +44,10 @@ def detect_and_validate_format(file_path):
     if extension == '.evtx':
         try:
             with open(file_path, 'rb') as f:
-                # EVTX files start with "EVT\0" (0x45, 0x56, 0x54, 0x00)
-                magic = f.read(4)
-                if magic == b'EVT\x00':
+                # EVTX files start with "ElfFile\0" signature (first 8 bytes)
+                # We check the first 7 bytes: "ElfFile"
+                magic = f.read(8)
+                if magic[:7] == b'ElfFile':
                     return 'evtx', True, None
                 else:
                     return 'evtx', False, f"Invalid EVTX magic bytes: {magic!r}"

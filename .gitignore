@@ -21,5 +21,6 @@ GitProjects.code-workspace
 .venv/
 
 # Logs and results
-engine/data/test/results/*.json
+engine/data/test/output/*json
+engine/data/test/output/*html
 
